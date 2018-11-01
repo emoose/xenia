@@ -11,6 +11,7 @@
 
 #include <string>
 
+#include "xenia/base/logging.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/string.h"
 #include "xenia/kernel/kernel_state.h"
@@ -40,10 +41,13 @@ ContentPackage::ContentPackage(KernelState* kernel_state, std::string root_name,
 
   // If this isn't a folder try mounting as STFS package
   // Otherwise mount as a local host path
-  if (!filesystem::IsFolder(package_path)) {
+  if (!filesystem::IsFolder(package_path + xe::kWPathSeparator)) {
+    XELOGI("ContentPackage: %ws not a folder", package_path.c_str());
     device =
         std::make_unique<vfs::StfsContainerDevice>(device_path_, package_path);
   } else {
+    package_path += xe::kWPathSeparator;
+    XELOGI("ContentPackage: %ws is a folder", package_path.c_str());
     device = std::make_unique<vfs::HostPathDevice>(device_path_, package_path,
                                                    false);
   }
@@ -242,6 +246,9 @@ X_RESULT ContentManager::DeleteContent(const XCONTENT_DATA& data) {
   auto global_lock = global_critical_region_.Acquire();
 
   auto package_path = ResolvePackagePath(data);
+
+  XELOGD("ContentPackage: Deleting package %ws", package_path.c_str());
+
   if (xe::filesystem::PathExists(package_path)) {
     if (xe::filesystem::IsFolder(package_path)) {
       xe::filesystem::DeleteFolder(package_path);
