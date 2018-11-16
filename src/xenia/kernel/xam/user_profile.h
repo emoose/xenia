@@ -194,7 +194,8 @@ class UserProfile {
   util::GpdFile* SetTitleSpaData(const util::SpaFile& spa_data);
   util::GpdFile* GetTitleGpd() { return curr_gpd_; }
 
-  bool UpdateGpdFiles();
+  bool UpdateTitleGpd();
+  bool UpdateAllGpds();
 
  private:
   void LoadGpdFiles();
@@ -208,6 +209,7 @@ class UserProfile {
   std::unordered_map<uint32_t, util::GpdFile> title_gpds_;
   util::GpdFile dash_gpd_;
   util::GpdFile* curr_gpd_ = nullptr;
+  uint32_t curr_title_id_ = -1;
 };
 
 }  // namespace xam
