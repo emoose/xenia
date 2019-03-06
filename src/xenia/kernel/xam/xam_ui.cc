@@ -269,9 +269,17 @@ dword_result_t XamShowKeyboardUI(dword_t user_index, dword_t flags,
                                  lpwstring_t description, lpwstring_t buffer,
                                  dword_t buffer_length,
                                  pointer_t<XAM_OVERLAPPED> overlapped) {
-  if (!buffer) {
+  // overlapped should always be set, xam seems to check for this specifically
+  if (!overlapped) {
+    assert_always();
     return X_ERROR_INVALID_PARAMETER;
   }
+
+  // Set overlapped result to X_ERROR_IO_PENDING
+  XOverlappedSetResult((void*)overlapped.host_address(), X_ERROR_IO_PENDING);
+
+  // Broadcast XN_SYS_UI = true
+  kernel_state()->BroadcastNotification(0x9, true);
 
   if (FLAGS_headless) {
     // Redirect default_text back into the buffer.
@@ -280,42 +288,71 @@ dword_result_t XamShowKeyboardUI(dword_t user_index, dword_t flags,
       xe::store_and_swap<std::wstring>(buffer, default_text.value());
     }
 
-    if (overlapped) {
-      kernel_state()->CompleteOverlappedImmediate(overlapped, X_ERROR_SUCCESS);
-      return X_ERROR_IO_PENDING;
-    } else {
-      return X_ERROR_SUCCESS;
-    }
+    // TODO: we should probably setup a thread to complete the overlapped a few
+    // seconds after this returns, to simulate the user taking a few seconds to
+    // enter text
+    kernel_state()->CompleteOverlappedImmediate(overlapped, X_ERROR_SUCCESS);
+
+    // Broadcast XN_SYS_UI = false
+    kernel_state()->BroadcastNotification(0x9, false);
+
+    return X_ERROR_IO_PENDING;
   }
 
-  std::wstring out_text;
+  // Instead of waiting for the keyboard dialog to finish before returning,
+  // we'll create a thread that'll wait for it instead, and return immediately.
+  // This way we can let the game run any "code-to-run-while-UI-is-active" code
+  // that it might need to.
 
   auto display_window = kernel_state()->emulator()->display_window();
-  xe::threading::Fence fence;
   display_window->loop()->PostSynchronous([&]() {
+    ++xam_dialogs_shown_;
+    auto out_text = new std::wstring();
+    auto fence = new xe::threading::Fence();
+    // Create the dialog
     (new KeyboardInputDialog(display_window, title ? title.value() : L"",
                              description ? description.value() : L"",
                              default_text ? default_text.value() : L"",
-                             &out_text, buffer_length))
-        ->Then(&fence);
+                             out_text, buffer_length))
+        ->Then(fence);
+
+    // The function to be run once dialog has finished
+    auto ui_fn = [fence, out_text, buffer, buffer_length, overlapped]() {
+      fence->Wait();
+      delete fence;
+      --xam_dialogs_shown_;
+
+      // Zero the output buffer.
+      std::memset(buffer, 0, buffer_length * 2);
+
+      // Copy the string.
+      size_t size = buffer_length;
+      if (size > out_text->size()) {
+        size = out_text->size();
+      }
+
+      xe::copy_and_swap((wchar_t*)buffer.host_address(), out_text->c_str(),
+                        size);
+      delete out_text;
+
+      // TODO: this will set overlapped's context to ui_threads thread ID
+      // is that a good idea?
+      kernel_state()->CompleteOverlappedImmediate(overlapped, X_ERROR_SUCCESS);
+
+      // Broadcast XN_SYS_UI = false
+      kernel_state()->BroadcastNotification(0x9, false);
+
+      return 0;
+    };
+
+    // Create a host thread to run the function above
+    auto ui_thread = kernel::object_ref<kernel::XHostThread>(
+        new kernel::XHostThread(kernel_state(), 128 * 1024, 0, ui_fn));
+    ui_thread->set_name("XamShowKeyboardUI Thread");
+    ui_thread->Create();
   });
-  ++xam_dialogs_shown_;
-  fence.Wait();
-  --xam_dialogs_shown_;
 
-  // Zero the output buffer.
-  std::memset(buffer, 0, buffer_length * 2);
-
-  // Truncate the string.
-  out_text = out_text.substr(0, buffer_length - 1);
-  xe::store_and_swap<std::wstring>(buffer, out_text);
-
-  if (overlapped) {
-    kernel_state()->CompleteOverlappedImmediate(overlapped, X_ERROR_SUCCESS);
-    return X_ERROR_IO_PENDING;
-  } else {
-    return X_ERROR_SUCCESS;
-  }
+  return X_ERROR_IO_PENDING;
 }
 DECLARE_XAM_EXPORT1(XamShowKeyboardUI, kUI, kImplemented);
 
