@@ -13,6 +13,7 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_private.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/window.h"
 #include "xenia/xbox.h"
@@ -110,13 +111,27 @@ dword_result_t XamShowMessageBoxUI(dword_t user_index, lpwstring_t title_ptr,
     buttons.push_back(button);
   }
 
+  // Set overlapped result to X_ERROR_IO_PENDING
+  if (overlapped) {
+    XOverlappedSetResult((void*)overlapped.host_address(), X_ERROR_IO_PENDING);
+  }
+
+  // Broadcast XN_SYS_UI = true
+  kernel_state()->BroadcastNotification(0x9, true);
+
   uint32_t chosen_button;
   if (FLAGS_headless) {
     // Auto-pick the focused button.
-    chosen_button = active_button;
+    *result_ptr = (uint32_t)active_button;
+
+    if (overlapped) {
+      kernel_state()->CompleteOverlappedImmediate(overlapped, X_ERROR_SUCCESS);
+    }
+
+    // Broadcast XN_SYS_UI = false
+    kernel_state()->BroadcastNotification(0x9, false);
   } else {
     auto display_window = kernel_state()->emulator()->display_window();
-    xe::threading::Fence fence;
     display_window->loop()->PostSynchronous([&]() {
       // TODO(benvanik): setup icon states.
       switch (flags & 0xF) {
@@ -133,22 +148,49 @@ dword_result_t XamShowMessageBoxUI(dword_t user_index, lpwstring_t title_ptr,
           // config.pszMainIcon = TD_INFORMATION_ICON;
           break;
       }
+
+      ++xam_dialogs_shown_;
+      auto chosen_button = new uint32_t();
+      auto fence = new xe::threading::Fence();
       (new MessageBoxDialog(display_window, title, text, buttons, active_button,
-                            &chosen_button))
-          ->Then(&fence);
+                            chosen_button))
+          ->Then(fence);
+
+      // The function to be run once dialog has finished
+      auto ui_fn = [fence, result_ptr, chosen_button, overlapped]() {
+        fence->Wait();
+        delete fence;
+        --xam_dialogs_shown_;
+
+        *result_ptr = *chosen_button;
+        delete chosen_button;
+
+        if (overlapped) {
+          // TODO: this will set overlapped's context to ui_threads thread
+          // ID, is that a good idea?
+          kernel_state()->CompleteOverlappedImmediate(overlapped,
+                                                      X_ERROR_SUCCESS);
+        }
+
+        // Broadcast XN_SYS_UI = false
+        kernel_state()->BroadcastNotification(0x9, false);
+
+        return 0;
+      };
+
+      // Create a host thread to run the function above
+      auto ui_thread = kernel::object_ref<kernel::XHostThread>(
+          new kernel::XHostThread(kernel_state(), 128 * 1024, 0, ui_fn));
+      ui_thread->set_name("XamShowMessageBoxUI Thread");
+      ui_thread->Create();
     });
-    ++xam_dialogs_shown_;
-    fence.Wait();
-    --xam_dialogs_shown_;
   }
   *result_ptr = chosen_button;
 
   if (overlapped) {
-    kernel_state()->CompleteOverlappedImmediate(overlapped, X_ERROR_SUCCESS);
     return X_ERROR_IO_PENDING;
-  } else {
-    return X_ERROR_SUCCESS;
   }
+  return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamShowMessageBoxUI, kUI, kImplemented);
 
