@@ -111,6 +111,11 @@ dword_result_t XamShowMessageBoxUI(dword_t user_index, lpwstring_t title_ptr,
     buttons.push_back(button);
   }
 
+  // Set overlapped result to X_ERROR_IO_PENDING
+  if (overlapped) {
+    XOverlappedSetResult((void*)overlapped.host_address(), X_ERROR_IO_PENDING);
+  }
+
   // Broadcast XN_SYS_UI = true
   kernel_state()->BroadcastNotification(0x9, true);
 
@@ -172,7 +177,9 @@ dword_result_t XamShowMessageBoxUI(dword_t user_index, lpwstring_t title_ptr,
     // Auto-pick the focused button.
     *result_ptr = (uint32_t)active_button;
 
-    kernel_state()->CompleteOverlappedImmediate(overlapped, X_ERROR_SUCCESS);
+    if (overlapped) {
+      kernel_state()->CompleteOverlappedImmediate(overlapped, X_ERROR_SUCCESS);
+    }
 
     // Broadcast XN_SYS_UI = false
     kernel_state()->BroadcastNotification(0x9, false);
