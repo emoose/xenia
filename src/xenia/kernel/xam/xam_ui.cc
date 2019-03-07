@@ -361,27 +361,55 @@ dword_result_t XamShowDeviceSelectorUI(dword_t user_index, dword_t content_type,
                                        qword_t total_requested,
                                        lpdword_t device_id_ptr,
                                        pointer_t<XAM_OVERLAPPED> overlapped) {
-  // NOTE: 0xF00D0000 magic from xam_content.cc
-  switch (content_type) {
-    case 1:  // save game
-      *device_id_ptr = 0xF00D0000 | 0x0001;
-      break;
-    case 2:  // marketplace
-      *device_id_ptr = 0xF00D0000 | 0x0002;
-      break;
-    case 3:  // title/publisher update?
-      *device_id_ptr = 0xF00D0000 | 0x0003;
-      break;
-    default:
-      assert_unhandled_case(content_type);
-      *device_id_ptr = 0xF00D0000 | 0x0001;
-      break;
+  // Set overlapped to X_ERROR_IO_PENDING
+  if (overlapped) {
+    XOverlappedSetResult((void*)overlapped.host_address(), X_ERROR_IO_PENDING);
   }
 
+  // Broadcast XN_SYS_UI = true
+  kernel_state()->BroadcastNotification(0x9, true);
+
+  auto ui_fn = [content_type, device_id_ptr, overlapped]() {
+    // Sleep for 1.5 seconds, act like user is making a choice
+    xe::threading::Sleep(std::chrono::milliseconds(1500));
+
+    // NOTE: 0xF00D0000 magic from xam_content.cc
+    switch (content_type) {
+      case 1:  // save game
+        *device_id_ptr = 0xF00D0000 | 0x0001;
+        break;
+      case 2:  // marketplace
+        *device_id_ptr = 0xF00D0000 | 0x0002;
+        break;
+      case 3:  // title/publisher update?
+        *device_id_ptr = 0xF00D0000 | 0x0003;
+        break;
+      default:
+        assert_unhandled_case(content_type);
+        *device_id_ptr = 0xF00D0000 | 0x0001;
+        break;
+    }
+
+    if (overlapped) {
+      kernel_state()->CompleteOverlappedImmediate(overlapped, X_ERROR_SUCCESS);
+    }
+
+    // Broadcast XN_SYS_UI = false
+    kernel_state()->BroadcastNotification(0x9, false);
+
+    return 0;
+  };
+
   if (overlapped) {
-    kernel_state()->CompleteOverlappedImmediate(overlapped, X_ERROR_SUCCESS);
+    // Create a host thread to run the function above
+    auto ui_thread = kernel::object_ref<kernel::XHostThread>(
+        new kernel::XHostThread(kernel_state(), 128 * 1024, 0, ui_fn));
+    ui_thread->set_name("XamShowDeviceSelectorUI Thread");
+    ui_thread->Create();
+
     return X_ERROR_IO_PENDING;
   } else {
+    ui_fn();
     return X_ERROR_SUCCESS;
   }
 }
