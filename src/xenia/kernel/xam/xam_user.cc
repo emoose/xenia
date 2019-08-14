@@ -515,8 +515,8 @@ DECLARE_XAM_EXPORT1(XamSessionCreateHandle, kUserProfiles, kStub);
 
 dword_result_t XamSessionRefObjByHandle(dword_t handle, lpdword_t obj_ptr) {
   assert_true(handle == 0xCAFEDEAD);
-  *obj_ptr = 0;
-  return X_ERROR_FUNCTION_FAILED;
+  *obj_ptr = 0xDEADF00D; // dummy value for ObDereferenceObject
+  return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamSessionRefObjByHandle, kUserProfiles, kStub);
 
