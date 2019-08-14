@@ -14,6 +14,7 @@
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/kernel/xenumerator.h"
+#include "xenia/kernel/xsession.h"
 #include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
 
@@ -508,15 +509,25 @@ dword_result_t XamWriteGamerTile(dword_t arg1, dword_t arg2, dword_t arg3,
 DECLARE_XAM_EXPORT1(XamWriteGamerTile, kUserProfiles, kStub);
 
 dword_result_t XamSessionCreateHandle(lpdword_t handle_ptr) {
-  *handle_ptr = 0xCAFEDEAD;
-  return X_ERROR_SUCCESS;
+  auto session = new XSession(kernel_state());
+  session->Initialize();
+
+  *handle_ptr = session->handle();
+
+  return X_STATUS_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamSessionCreateHandle, kUserProfiles, kStub);
 
 dword_result_t XamSessionRefObjByHandle(dword_t handle, lpdword_t obj_ptr) {
-  assert_true(handle == 0xCAFEDEAD);
-  *obj_ptr = 0;
-  return X_ERROR_FUNCTION_FAILED;
+  auto object = kernel_state()->object_table()->LookupObject<XSession>(handle);
+  if (!object) {
+    return X_STATUS_INVALID_HANDLE;
+  }
+  object->Retain();
+  if (obj_ptr.guest_address()) {
+    *obj_ptr = object->guest_object();
+  }
+  return X_STATUS_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamSessionRefObjByHandle, kUserProfiles, kStub);
 
