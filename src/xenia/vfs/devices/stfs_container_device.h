@@ -173,6 +173,9 @@ enum class XContentVolumeType : uint32_t {
 };
 
 struct XContentMetadata {
+  static const uint32_t kThumbLength = 0x3D00;
+  static const uint32_t kThumbLengthV1 = 0x4000;
+
   xe::be<XContentType> content_type;
   xe::be<uint32_t> metadata_version;
   xe::be<uint64_t> content_size;

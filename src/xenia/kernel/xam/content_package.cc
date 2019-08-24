@@ -118,9 +118,10 @@ X_RESULT FolderContentPackage::GetThumbnail(std::vector<uint8_t>* buffer) {
                                   sizeof(vfs::StfsHeader));
     if (map) {
       auto* header = (vfs::StfsHeader*)map->data();
-      buffer->resize(header->metadata.thumbnail_size);
-      memcpy(buffer->data(), header->metadata.thumbnail,
-             header->metadata.thumbnail_size);
+      uint32_t thumb_size = std::min((uint32_t)header->metadata.thumbnail_size,
+                                     xe::vfs::XContentMetadata::kThumbLengthV1);
+      buffer->resize(thumb_size);
+      memcpy(buffer->data(), header->metadata.thumbnail, thumb_size);
       result = X_ERROR_SUCCESS;
     }
   }
@@ -171,14 +172,15 @@ X_RESULT StfsContentPackage::GetThumbnail(std::vector<uint8_t>* buffer) {
   if (!device_inited_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
-  buffer->resize(header_.metadata.thumbnail_size);
-  memcpy(buffer->data(), header_.metadata.thumbnail,
-         header_.metadata.thumbnail_size);
+  uint32_t thumb_size = std::min((uint32_t)header_.metadata.thumbnail_size,
+                                 xe::vfs::XContentMetadata::kThumbLengthV1);
+  buffer->resize(thumb_size);
+  memcpy(buffer->data(), header_.metadata.thumbnail, thumb_size);
   return X_ERROR_SUCCESS;
 }
 
 X_RESULT StfsContentPackage::SetThumbnail(std::vector<uint8_t> buffer) {
-  return X_ERROR_FUNCTION_FAILED;  // can't write to STFS headers right now
+  return X_ERROR_FUNCTION_FAILED;  // can't write to STFS package right now
 }
 
 X_RESULT StfsContentPackage::Delete() {
