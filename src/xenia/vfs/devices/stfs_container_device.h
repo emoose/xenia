@@ -10,6 +10,7 @@
 #ifndef XENIA_VFS_DEVICES_STFS_CONTAINER_DEVICE_H_
 #define XENIA_VFS_DEVICES_STFS_CONTAINER_DEVICE_H_
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <string>
@@ -261,6 +262,53 @@ struct XContentMetadata {
     xe::copy_and_swap<wchar_t>(wstr.data(), title_name, wcslen(title_name));
 
     return std::wstring(wstr.data());
+  }
+
+  bool set_display_name(const std::wstring& value, XLocale locale) {
+    uint32_t locale_id = (uint32_t)locale;
+    locale_id--;
+
+    wchar_t* str = 0;
+    if (locale_id >= 0 && locale_id < 9) {
+      str = display_name[locale_id];
+    } else if (locale_id >= 9 && locale_id < 12 && metadata_version >= 2) {
+      str = display_name_ex[locale_id - 9];
+    }
+    if (!str) {
+      return false;
+    }
+
+    xe::copy_and_swap<wchar_t>(str, value.c_str(),
+                               std::min(value.length(), (size_t)128));
+    return true;
+  }
+  bool set_description(const std::wstring& value, XLocale locale) {
+    uint32_t locale_id = (uint32_t)locale;
+    locale_id--;
+
+    wchar_t* str = 0;
+    if (locale_id >= 0 && locale_id < 9) {
+      str = description[locale_id];
+    } else if (locale_id >= 9 && locale_id < 12 && metadata_version >= 2) {
+      str = description_ex[locale_id - 9];
+    }
+    if (!str) {
+      return false;
+    }
+
+    xe::copy_and_swap<wchar_t>(str, value.c_str(),
+                               std::min(value.length(), (size_t)128));
+    return true;
+  }
+  bool set_publisher(const std::wstring& value) {
+    xe::copy_and_swap<wchar_t>(publisher, value.c_str(),
+                               std::min(value.length(), (size_t)128));
+    return true;
+  }
+  bool set_title_name(const std::wstring& value) {
+    xe::copy_and_swap<wchar_t>(title_name, value.c_str(),
+                               std::min(value.length(), (size_t)128));
+    return true;
   }
 };
 static_assert_size(XContentMetadata, 0x93D6);
