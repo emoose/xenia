@@ -163,7 +163,8 @@ bool ContentManager::ContentExists(const XCONTENT_DATA& data) {
 }
 
 X_RESULT ContentManager::CreateContent(std::string root_name,
-                                       const XCONTENT_DATA& data) {
+                                       const XCONTENT_DATA& data,
+                                       uint32_t flags) {
   auto global_lock = global_critical_region_.Acquire();
 
   auto package_path = ResolvePackagePath(data);
@@ -201,6 +202,18 @@ X_RESULT ContentManager::CreateContent(std::string root_name,
     // Set header defaults...
     vfs::StfsHeader* header = new vfs::StfsHeader();
     header->set_defaults();
+
+    // Set metadata flags...
+    if (flags & XCONTENTFLAG_NODEVICE_TRANSFER) {
+      header->metadata.flags.bits.device_transfer = false;
+    }
+    if ((flags & XCONTENTFLAG_ALLOWPROFILE_TRANSFER) &&
+        !(flags & XCONTENTFLAG_NOPROFILE_TRANSFER)) {
+      header->metadata.flags.bits.profile_transfer = true;
+    }
+    if (flags & XCONTENTFLAG_MOVEONLY_TRANSFER) {
+      header->metadata.flags.bits.move_only_transfer = true;
+    }
 
     // Try copying execution info from XEX opt headers
     auto exe_module = kernel_state_->GetExecutableModule();

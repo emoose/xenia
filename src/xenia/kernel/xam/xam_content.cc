@@ -301,7 +301,8 @@ dword_result_t XamContentCreateEx(dword_t user_index, lpstring_t root_name,
   }
 
   if (create) {
-    result = content_manager->CreateContent(root_name.value(), content_data);
+    result =
+        content_manager->CreateContent(root_name.value(), content_data, flags);
   } else if (open) {
     result = content_manager->OpenContent(root_name.value(), content_data);
   }
