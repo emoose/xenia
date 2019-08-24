@@ -80,9 +80,6 @@ std::vector<XCONTENT_DATA> ContentManager::ListContent(uint32_t device_id,
                                                        uint32_t content_type) {
   std::vector<XCONTENT_DATA> result;
 
-  // StfsHeader is a huge class - alloc on heap instead of stack
-  vfs::StfsHeader* header = new vfs::StfsHeader();
-
   // Search path:
   // content_root/title_id/type_name/*
   auto package_root = ResolvePackageRoot(content_type);
@@ -104,29 +101,28 @@ std::vector<XCONTENT_DATA> ContentManager::ListContent(uint32_t device_id,
 
       if (file_info.type != xe::filesystem::FileInfo::Type::kDirectory) {
         // Not a directory so must be a package, verify size to make sure
-        if (file_info.total_size <= vfs::StfsHeader::kHeaderLength) {
+        if (file_info.total_size <= sizeof(vfs::StfsHeader)) {
           continue;  // Invalid package (maybe .headers.bin)
         }
       }
 
       auto map = MappedMemory::Open(headers_path, MappedMemory::Mode::kRead, 0,
-                                    vfs::StfsHeader::kHeaderLength);
+                                    sizeof(vfs::StfsHeader));
       if (map) {
-        if (header->Read(map->data())) {
-          content_data.content_type =
-              static_cast<uint32_t>(header->content_type);
-          content_data.display_name = header->display_names;
-          // TODO: select localized display name
-          // some games may expect different ones depending on language setting.
-        }
+        auto* header = (vfs::StfsHeader*)map->data();
+
+        content_data.content_type =
+            static_cast<uint32_t>(header->metadata.content_type);
+        content_data.display_name = header->metadata.display_name[0];
+        // TODO: select localized display name
+        // some games may expect different ones depending on language setting.
+
         map->Close();
       }
     }
 
     result.emplace_back(std::move(content_data));
   }
-
-  delete header;
 
   return result;
 }

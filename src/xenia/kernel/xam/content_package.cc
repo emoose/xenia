@@ -114,19 +114,15 @@ X_RESULT FolderContentPackage::GetThumbnail(std::vector<uint8_t>* buffer) {
   // Try reading thumbnail from kStfsHeadersExtension file
   auto headers_path = package_path_ + ContentManager::kStfsHeadersExtension;
   if (xe::filesystem::PathExists(headers_path)) {
-    vfs::StfsHeader* header =
-        new vfs::StfsHeader();  // huge class, alloc on heap
     auto map = MappedMemory::Open(headers_path, MappedMemory::Mode::kRead, 0,
-                                  vfs::StfsHeader::kHeaderLength);
+                                  sizeof(vfs::StfsHeader));
     if (map) {
-      if (header->Read(map->data())) {
-        buffer->resize(header->thumbnail_image_size);
-        memcpy(buffer->data(), header->thumbnail_image,
-               header->thumbnail_image_size);
-        result = X_ERROR_SUCCESS;
-      }
+      auto* header = (vfs::StfsHeader*)map->data();
+      buffer->resize(header->metadata.thumbnail_size);
+      memcpy(buffer->data(), header->metadata.thumbnail,
+             header->metadata.thumbnail_size);
+      result = X_ERROR_SUCCESS;
     }
-    delete header;
   }
   return result;
 }
@@ -175,8 +171,9 @@ X_RESULT StfsContentPackage::GetThumbnail(std::vector<uint8_t>* buffer) {
   if (!device_inited_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
-  buffer->resize(header_.thumbnail_image_size);
-  memcpy(buffer->data(), header_.thumbnail_image, header_.thumbnail_image_size);
+  buffer->resize(header_.metadata.thumbnail_size);
+  memcpy(buffer->data(), header_.metadata.thumbnail,
+         header_.metadata.thumbnail_size);
   return X_ERROR_SUCCESS;
 }
 
