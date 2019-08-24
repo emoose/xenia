@@ -375,6 +375,21 @@ struct StfsHeader {
   XContentMetadata metadata;
   XContentInstaller installer;
   uint8_t padding[0x2F2];
+
+  void set_defaults() {
+    memset(this, 0, sizeof(StfsHeader));
+
+    header.magic = xe::vfs::XContentPackageType::kPackageTypeCon;
+    header.licenses[0].licensee_id =
+        -1;  // X360 gamesaves seem to set licenses like this
+    header.header_size = 0x971A;
+
+    metadata.metadata_version = 2;
+    memcpy(metadata.console_id, "XENIA", 5);
+
+    // Saves always have this set? How do titles choose this?
+    metadata.flags.bits.device_transfer = true;
+  }
 };
 static_assert_size(StfsHeader, 0xB000);
 #pragma pack(pop)

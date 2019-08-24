@@ -15,6 +15,7 @@
 #include "xenia/base/string.h"
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/user_module.h"
 #include "xenia/kernel/xam/content_package.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/vfs/devices/host_path_device.h"
@@ -193,15 +194,41 @@ X_RESULT ContentManager::CreateContent(std::string root_name,
     return X_ERROR_FUNCTION_FAILED;  // failed to create headers file :(
   }
 
-  // Set headers using data from XCONTENT_DATA
-  vfs::StfsHeader* header = new vfs::StfsHeader();
-  // TODO: set title_id, title_name & publisher from XDBF info
-  header->metadata.content_type = (xe::vfs::XContentType)data.content_type;
-  header->metadata.set_display_name(data.display_name,
-                                    kernel_state_->emulator()->game_language());
-  fwrite(header, sizeof(vfs::StfsHeader), 1, file);
-  fclose(file);
-  delete header;
+  // Setup package headers!
+  {
+    // TODO: set publisher from XDBF info (but most saves don't have this set?)
+
+    // Set header defaults...
+    vfs::StfsHeader* header = new vfs::StfsHeader();
+    header->set_defaults();
+
+    // Try copying execution info from XEX opt headers
+    auto exe_module = kernel_state_->GetExecutableModule();
+    if (exe_module) {
+      xex2_opt_execution_info* exec_info = 0;
+      exe_module->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &exec_info);
+      if (exec_info) {
+        memcpy(&header->metadata.execution_info, exec_info,
+               sizeof(xex2_opt_execution_info));
+      }
+    }
+
+    // Copy game title in the games default language
+    // TODO: should this get the title in the users chosen lang instead?
+    header->metadata.set_title_name(kernel_state_->emulator()->game_title());
+
+    // Set package profile id (should be the offline XUID, 0xE0....)
+    header->metadata.profile_id = kernel_state_->user_profile()->xuid();
+
+    // Now copy data from XCONTENT_DATA into package headers
+    header->metadata.content_type = (xe::vfs::XContentType)data.content_type;
+    header->metadata.set_display_name(
+        data.display_name, kernel_state_->emulator()->game_language());
+
+    fwrite(header, sizeof(vfs::StfsHeader), 1, file);
+    fclose(file);
+    delete header;
+  }
 
   if (!package->Mount(root_name)) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
