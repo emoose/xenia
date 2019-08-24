@@ -552,10 +552,44 @@ StfsContainerDevice::Error StfsContainerDevice::ReadSTFS() {
     }
   }
 
-  return Error::kSuccess;
+  if (all_entries.size() > 0) {
+    return Error::kSuccess;
+  }
+
+  // Failed to load any entries, try with old algo if we haven't already
+  if (!use_old_algorithm_) {
+    use_old_algorithm_ = true;
+    return ReadSTFS();
+  }
+
+  // Tried with old algo and still no entries... return failure
+  return Error::kErrorReadError;
 }
 
 size_t StfsContainerDevice::BlockToOffsetSTFS(uint64_t block_index) {
+  if (use_old_algorithm_) {
+    return BlockToOffsetSTFS_Old(block_index);
+  }
+
+  uint32_t num_tables = 1;  // num hashtables per block? or maybe backingblocks?
+  if (((header_.header.header_size + 0xFFF) & 0xB000) == 0xB000 ||
+      !header_.metadata.stfs_volume_descriptor.Flags.bits.read_only_format) {
+    num_tables++;
+  }
+
+  uint64_t dataBlock = block_index + num_tables * ((block_index + 0xAA) / 0xAA);
+  if (block_index >= 170) {
+    dataBlock += num_tables * ((block_index + 0x70E4) / 0x70E4);
+    if (block_index >= 28900) {
+      dataBlock += num_tables * ((block_index + 0x4AF768) / 0x4AF768);
+    }
+  }
+
+  return xe::round_up(header_.header.header_size, 0x1000) +
+         (dataBlock * 0x1000);
+}
+
+size_t StfsContainerDevice::BlockToOffsetSTFS_Old(uint64_t block_index) {
   uint64_t block;
   uint32_t block_shift = 0;
   if (((header_.header.header_size + 0xFFF) & 0xB000) == 0xB000 ||
