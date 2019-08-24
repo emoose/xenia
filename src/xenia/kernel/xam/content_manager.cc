@@ -113,7 +113,8 @@ std::vector<XCONTENT_DATA> ContentManager::ListContent(uint32_t device_id,
 
         content_data.content_type =
             static_cast<uint32_t>(header->metadata.content_type);
-        content_data.display_name = header->metadata.display_name[0];
+        content_data.display_name =
+            header->metadata.get_display_name(XLocale::kEnglish);
         // TODO: select localized display name
         // some games may expect different ones depending on language setting.
 
@@ -185,6 +186,23 @@ X_RESULT ContentManager::CreateContent(std::string root_name,
   if (!package) {
     return X_ERROR_FUNCTION_FAILED;  // Failed to create directory?
   }
+
+  // Create .headers.bin file
+  auto headers_path = package_path + ContentManager::kStfsHeadersExtension;
+  auto* file = xe::filesystem::OpenFile(headers_path, "wb");
+  if (!file) {
+    return X_ERROR_FUNCTION_FAILED;  // failed to create headers file :(
+  }
+
+  // Set headers using data from XCONTENT_DATA
+  vfs::StfsHeader* header = new vfs::StfsHeader();
+  // TODO: set title_id, title_name & publisher from XDBF info
+  header->metadata.content_type = (xe::vfs::XContentType)data.content_type;
+  header->metadata.set_display_name(data.display_name, XLocale::kEnglish);
+  // TODO: set display name locale that's currently in use
+  fwrite(header, sizeof(vfs::StfsHeader), 1, file);
+  fclose(file);
+  delete header;
 
   if (!package->Mount(root_name)) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
