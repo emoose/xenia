@@ -56,7 +56,7 @@ XdbfBlock XdbfWrapper::GetEntry(XdbfSection section, uint64_t id) const {
   return {0};
 }
 
-std::string XdbfWrapper::GetStringTableEntry(XLocale locale,
+std::string XdbfWrapper::GetStringTableEntry(XLanguage locale,
                                              uint16_t string_id) const {
   auto language_block =
       GetEntry(XdbfSection::kStringTable, static_cast<uint64_t>(locale));
@@ -89,14 +89,14 @@ XdbfBlock XdbfGameData::icon() const {
   return GetEntry(XdbfSection::kImage, kXdbfIdTitle);
 }
 
-XLocale XdbfGameData::default_language() const {
+XLanguage XdbfGameData::default_language() const {
   auto block = GetEntry(XdbfSection::kMetadata, kXdbfIdXstc);
   if (!block.buffer) {
-    return XLocale::kEnglish;
+    return XLanguage::kEnglish;
   }
   auto xstc = reinterpret_cast<const XdbfXstc*>(block.buffer);
   assert_true(xstc->magic == kXdbfMagicXstc);
-  return static_cast<XLocale>(static_cast<uint32_t>(xstc->default_language));
+  return static_cast<XLanguage>(static_cast<uint32_t>(xstc->default_language));
 }
 
 std::string XdbfGameData::title() const {

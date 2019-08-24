@@ -51,7 +51,7 @@ class XdbfWrapper {
 
   // Gets a string from the string table in the given language.
   // Returns the empty string if the entry is not found.
-  std::string GetStringTableEntry(XLocale locale, uint16_t string_id) const;
+  std::string GetStringTableEntry(XLanguage locale, uint16_t string_id) const;
 
  protected:
 #pragma pack(push, 1)
@@ -121,7 +121,7 @@ class XdbfGameData : public XdbfWrapper {
   XdbfBlock icon() const;
 
   // The game's default language.
-  XLocale default_language() const;
+  XLanguage default_language() const;
 
   // The game's title in its default language.
   std::string title() const;

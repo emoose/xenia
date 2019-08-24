@@ -209,7 +209,7 @@ struct XContentMetadata {
   uint8_t title_thumbnail[0x3D00];
   uint16_t description_ex[3][0x80];
 
-  std::wstring get_display_name(XLocale locale) {
+  std::wstring get_display_name(XLanguage locale) {
     uint32_t locale_id = (uint32_t)locale;
     locale_id--;
 
@@ -229,7 +229,7 @@ struct XContentMetadata {
 
     return std::wstring(wstr.data());
   }
-  std::wstring get_description(XLocale locale) {
+  std::wstring get_description(XLanguage locale) {
     uint32_t locale_id = (uint32_t)locale;
     locale_id--;
 
@@ -266,7 +266,7 @@ struct XContentMetadata {
     return std::wstring(wstr.data());
   }
 
-  bool set_display_name(const std::wstring& value, XLocale locale) {
+  bool set_display_name(const std::wstring& value, XLanguage locale) {
     uint32_t locale_id = (uint32_t)locale;
     locale_id--;
 
@@ -284,7 +284,7 @@ struct XContentMetadata {
                                std::min(value.length(), (size_t)128));
     return true;
   }
-  bool set_description(const std::wstring& value, XLocale locale) {
+  bool set_description(const std::wstring& value, XLanguage locale) {
     uint32_t locale_id = (uint32_t)locale;
     locale_id--;
 

@@ -352,17 +352,23 @@ typedef struct {
 } X_EXCEPTION_RECORD;
 static_assert_size(X_EXCEPTION_RECORD, 0x50);
 
-// Found by dumping the kSectionStringTable sections of various games:
-enum class XLocale : uint32_t {
-  kUnknown = 0,
-  kEnglish = 1,
-  kJapanese = 2,
-  kGerman = 3,
-  kFrench = 4,
-  kSpanish = 5,
-  kItalian = 6,
-  kKorean = 7,
-  kChinese = 8,
+// Found by dumping the kSectionStringTable sections of various games
+// And from xgetlanguage_id values in https://pastebin.com/8BcXh50G
+enum class XLanguage : uint32_t {
+  kInvalid,
+  kEnglish,
+  kJapanese,
+  kGerman,
+  kFrench,
+  kSpanish,
+  kItalian,
+  kKorean,
+  kTChinese,
+  kUnknown9,   // unused?
+  kUnknown10,  // unused?
+  kPolish,
+  kRussian,
+  kMaxLanguages  // STFS headers can't support any more languages than these?
 };
 
 #pragma pack(pop)
