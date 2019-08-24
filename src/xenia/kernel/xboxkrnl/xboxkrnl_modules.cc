@@ -9,16 +9,12 @@
 
 #include "xenia/base/logging.h"
 #include "xenia/cpu/processor.h"
+#include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/xbox.h"
-
-DEFINE_int32(game_language, 1,
-             "The language for the game to run in. 1=EN / 2=JP / 3=DE / 4=FR / "
-             "5=ES / 6=IT / 7=KR / 8=CN",
-             "General");
 
 namespace xe {
 namespace kernel {
@@ -62,7 +58,8 @@ X_STATUS xeExGetXConfigSetting(uint16_t category, uint16_t setting,
           break;
         case 0x0009:  // XCONFIG_USER_LANGUAGE
           setting_size = 4;
-          xe::store_and_swap<uint32_t>(value, cvars::game_language);  // English
+          xe::store_and_swap<uint32_t>(
+              value, (uint32_t)kernel_state()->emulator()->game_language());
           break;
         case 0x000A:  // XCONFIG_USER_VIDEO_FLAGS
           setting_size = 4;

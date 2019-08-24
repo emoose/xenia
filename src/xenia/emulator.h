@@ -13,12 +13,15 @@
 #include <functional>
 #include <string>
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/delegate.h"
 #include "xenia/base/exception_handler.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/memory.h"
 #include "xenia/vfs/virtual_file_system.h"
 #include "xenia/xbox.h"
+
+DECLARE_int32(game_language);
 
 namespace xe {
 namespace apu {
@@ -65,6 +68,9 @@ class Emulator {
 
   // Are we currently running a title?
   bool is_title_open() const { return title_id_ != 0; }
+
+  // Users chosen language as an XLanguage
+  XLanguage game_language() const { return (XLanguage)cvars::game_language; }
 
   // Window used for displaying graphical output.
   ui::Window* display_window() const { return display_window_; }

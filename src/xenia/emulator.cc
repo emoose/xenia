@@ -48,6 +48,11 @@ DEFINE_double(time_scalar, 1.0,
               "Scalar used to speed or slow time (1x, 2x, 1/2x, etc).",
               "General");
 
+DEFINE_int32(game_language, 1,
+             "The language for the game to run in. 1=EN / 2=JP / 3=DE / 4=FR / "
+             "5=ES / 6=IT / 7=KR / 8=CN / 11 = PL / 12 = RU",
+             "General");
+
 namespace xe {
 
 Emulator::Emulator(const std::wstring& command_line,

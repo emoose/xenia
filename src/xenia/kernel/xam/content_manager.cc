@@ -13,6 +13,7 @@
 
 #include "xenia/base/filesystem.h"
 #include "xenia/base/string.h"
+#include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/content_package.h"
 #include "xenia/kernel/xobject.h"
@@ -113,10 +114,8 @@ std::vector<XCONTENT_DATA> ContentManager::ListContent(uint32_t device_id,
 
         content_data.content_type =
             static_cast<uint32_t>(header->metadata.content_type);
-        content_data.display_name =
-            header->metadata.get_display_name(XLanguage::kEnglish);
-        // TODO: select localized display name
-        // some games may expect different ones depending on language setting.
+        content_data.display_name = header->metadata.get_display_name(
+            kernel_state_->emulator()->game_language());
 
         map->Close();
       }
@@ -198,8 +197,8 @@ X_RESULT ContentManager::CreateContent(std::string root_name,
   vfs::StfsHeader* header = new vfs::StfsHeader();
   // TODO: set title_id, title_name & publisher from XDBF info
   header->metadata.content_type = (xe::vfs::XContentType)data.content_type;
-  header->metadata.set_display_name(data.display_name, XLanguage::kEnglish);
-  // TODO: set display name locale that's currently in use
+  header->metadata.set_display_name(data.display_name,
+                                    kernel_state_->emulator()->game_language());
   fwrite(header, sizeof(vfs::StfsHeader), 1, file);
   fclose(file);
   delete header;
