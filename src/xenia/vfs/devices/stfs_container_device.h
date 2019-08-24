@@ -48,8 +48,8 @@ struct StfsVolumeDescriptor {
   uint8_t directory_block_num1;
   uint8_t directory_block_num2;
   uint8_t root_hash[0x14];
-  xe::be<uint32_t> NumberOfTotalBlocks;
-  xe::be<uint32_t> NumberOfFreeBlocks;
+  xe::be<uint32_t> num_blocks_total;
+  xe::be<uint32_t> num_blocks_free;
 
   uint32_t directory_block_count() {
     return directory_block_count0 | (directory_block_count1 << 8);
