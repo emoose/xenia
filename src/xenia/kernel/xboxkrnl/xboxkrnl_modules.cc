@@ -32,6 +32,22 @@ dword_result_t XexCheckExecutablePrivilege(dword_t privilege) {
     return 0;
   }
 
+  if (privilege == 0xB) {  // TitleInsecureUtilityDrive
+    // If this privilege is set, the cache-partition code baked into most
+    // games skips a huge chunk of device-init code (registering a custom
+    // STFC filesystem handler with the kernel, etc), and just symlinks the
+    // cache partition to the existing device directly (I guess on 360 this
+    // would probably make it FATX, explaining the 'Insecure' part of it)
+
+    // Thanks to this skip we can easily take control of the cache partition
+    // ourselves, just by symlinking it before the game does!
+
+    // TODO: check if this skip-code is actually available on every game that
+    // uses cache - it's possible that early/later SDKs might not have it, and
+    // we won't be able to rely on using this cheat for everything...
+    return 1;
+  }
+
   uint32_t flags = 0;
   module->GetOptHeader<uint32_t>(XEX_HEADER_SYSTEM_FLAGS, &flags);
 

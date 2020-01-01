@@ -41,8 +41,11 @@
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/vfs/devices/disc_image_device.h"
 #include "xenia/vfs/devices/host_path_device.h"
+#include "xenia/vfs/devices/null_device.h"
 #include "xenia/vfs/devices/stfs_container_device.h"
 #include "xenia/vfs/virtual_file_system.h"
+
+DECLARE_bool(mount_cache);
 
 DEFINE_double(time_scalar, 1.0,
               "Scalar used to speed or slow time (1x, 2x, 1/2x, etc).",
@@ -650,6 +653,19 @@ std::string Emulator::FindLaunchModule() {
 
 X_STATUS Emulator::CompleteLaunch(const std::wstring& path,
                                   const std::string& module_path) {
+  if (cvars::mount_cache) {
+    // Below are accessed directly by STFC/cache code baked into the game
+    // By using a NullDevice that just returns success to all IO requests, the
+    // cache code should hopefully progress without erroring out
+    auto null_files = {std::string("\\Partition0"), std::string("\\Cache0"),
+                       std::string("\\Cache1")};
+    auto null_device =
+        std::make_unique<vfs::NullDevice>("\\Device\\Harddisk0", null_files);
+    if (null_device->Initialize()) {
+      file_system_->RegisterDevice(std::move(null_device));
+    }
+  }
+
   // Reset state.
   title_id_ = 0;
   game_title_ = L"";
