@@ -275,7 +275,7 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
         // R
         buttons |= 0x4000;  // XINPUT_GAMEPAD_X
       }
-      if (IS_KEY_DOWN('Q')) {
+      if (IS_KEY_DOWN('F')) {
         // Q
         buttons |= 0x2000;  // XINPUT_GAMEPAD_B
       }
@@ -283,7 +283,7 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
         // E
         buttons |= 0x1000;  // XINPUT_GAMEPAD_A
       }
-      if (IS_KEY_DOWN(VK_SPACE)) {
+      if (IS_KEY_DOWN('Q')) {
         // Space
         buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
       }
