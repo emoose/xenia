@@ -15,6 +15,11 @@
 #include "xenia/ui/window.h"
 #include "xenia/ui/window_win.h"
 
+DEFINE_bool(invert_y, false, "Invert mouse Y axis", "MouseHook");
+DEFINE_bool(swap_buttons, false, "Swap left & right click mouse buttons",
+            "MouseHook");
+DEFINE_double(sensitivity, 1, "Mouse sensitivity", "MouseHook");
+
 namespace xe {
 namespace hid {
 namespace winkey {
@@ -148,10 +153,12 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
         }
       }
 
-      if (mouse_left_click_) {
+      if ((!cvars::swap_buttons && mouse_left_click_) ||
+          (cvars::swap_buttons && mouse_right_click_)) {
         right_trigger = 0xFF;
       }
-      if (mouse_right_click_) {
+      if ((!cvars::swap_buttons && mouse_right_click_) ||
+          (cvars::swap_buttons && mouse_left_click_)) {
         left_trigger = 0xFF;
       }
 
@@ -175,8 +182,13 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
           float camX = (float)*playerCamX;
           float camY = (float)*playerCamY;
 
-          camX += (((float)mouse_x_delta) / 10.f);
-          camY -= (((float)mouse_y_delta) / 10.f);
+          camX += (((float)mouse_x_delta) / 10.f) * (float)cvars::sensitivity;
+
+          if (!cvars::invert_y) {
+            camY -= (((float)mouse_y_delta) / 10.f) * (float)cvars::sensitivity;
+          } else {
+            camY += (((float)mouse_y_delta) / 10.f) * (float)cvars::sensitivity;
+          }
 
           *playerCamX = camX;
           *playerCamY = camY;
