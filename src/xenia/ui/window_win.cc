@@ -287,6 +287,15 @@ void Win32Window::ToggleFullscreen(bool fullscreen) {
       AdjustWindowRect(&rc, GetWindowLong(hwnd_, GWL_STYLE), false);
       MoveWindow(hwnd_, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
                  TRUE);
+
+      // Reduce cursor bounds by 1px on each side, just in case..
+      rc.top++;
+      rc.left++;
+      rc.bottom--;
+      rc.right--;
+
+      // Keep cursor inside the fullscreen window
+      ClipCursor(&rc);
     }
   } else {
     // Reinstate borders, resize to 1280x720
@@ -297,6 +306,9 @@ void Win32Window::ToggleFullscreen(bool fullscreen) {
     if (main_menu) {
       ::SetMenu(hwnd_, main_menu->handle());
     }
+
+    // Unbound the mouse cursor
+    ClipCursor(NULL);
   }
 
   fullscreen_ = fullscreen;
@@ -638,6 +650,20 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
       has_focus_ = true;
       auto e = UIEvent(this);
       OnGotFocus(&e);
+
+      if (is_fullscreen()) {
+        // Cursor bounds can be lost when focus is lost, reapply them...
+        // TODO: can this go somewhere better?
+        RECT bounds;
+        GetWindowRect(hwnd(), &bounds);
+        // Reduce cursor bounds by 1px on each side, just in case..
+        bounds.top++;
+        bounds.left++;
+        bounds.bottom--;
+        bounds.right--;
+        ClipCursor(&bounds);
+      }
+
       break;
     }
 
