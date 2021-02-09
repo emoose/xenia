@@ -42,10 +42,10 @@ class WinKeyInputDriver : public InputDriver {
   };
 
   struct MouseEvent {
-    int32_t x = 0;
-    int32_t y = 0;
-    int32_t dx = 0;
-    int32_t dy = 0;
+    int32_t x_delta = 0;
+    int32_t y_delta = 0;
+    int32_t buttons = 0;
+    int32_t wheel_delta = 0;
   };
 
   xe::global_critical_region global_critical_region_;
