@@ -171,9 +171,10 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
 
     if (mouse_wheel_delta != 0) {
       if (mouse_wheel_delta > 0) {
-        buttons |= 0x2000;  // XINPUT_GAMEPAD_B
-      } else {
         buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
+      } else {
+        buttons |= 0x8000;  // XINPUT_GAMEPAD_Y + RT
+        right_trigger = 0xFF;
       }
     }
 
@@ -310,7 +311,7 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
         // Z
         buttons |= 0x0020;  // XINPUT_GAMEPAD_BACK
       }
-      if (IS_KEY_DOWN('X')) {
+      if (IS_KEY_DOWN('X') || IS_KEY_DOWN(VK_RETURN)) {
         // X
         buttons |= 0x0010;  // XINPUT_GAMEPAD_START
       }
