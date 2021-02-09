@@ -55,6 +55,12 @@ DEFINE_string(
     "module.",
     "General");
 
+
+DEFINE_bool(remove_blur, false,
+            "(GoldenEye) Removes low-res blur when in classic-graphics mode", "MouseHook");
+DEFINE_bool(debug_menu, false,
+            "(GoldenEye) Enables the debug menu, accessible with LB/1", "MouseHook");
+
 namespace xe {
 
 Emulator::Emulator(const std::filesystem::path& command_line,
@@ -681,6 +687,43 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         auto icon_block = db.icon();
         if (icon_block) {
           display_window_->SetIcon(icon_block.buffer, icon_block.size);
+        }
+      }
+    }
+
+    if (module->title_id() == 0x584108A9) {
+      // Check if this is the Aug 25th 2007 GE build
+      auto* test_addr =
+          (xe::be<uint32_t>*)module->memory()->TranslateVirtual(0x8200336C);
+      if (*test_addr == 0x676f6c64) {
+        if (cvars::remove_blur) {
+          // Patch out N64 blur
+          // Source:
+          // https://github.com/xenia-canary/game-patches/blob/main/patches/584108A9.patch
+
+          const uint32_t patch_addr = 0x82188E70;
+          auto* patch_ptr =
+              (xe::be<uint32_t>*)module->memory()->TranslateVirtual(patch_addr);
+          auto heap = module->memory()->LookupHeap(patch_addr);
+
+          uint32_t old_protect = 0;
+          heap->Protect(patch_addr, 4, kMemoryProtectRead | kMemoryProtectWrite,
+                        &old_protect);
+          *patch_ptr = 0x60000000;
+          heap->Protect(patch_addr, 4, old_protect);
+        }
+
+        if (cvars::debug_menu) {
+          // Enable debug menu
+          const uint32_t patch_addr = 0x82189F2B;
+          auto* patch_ptr = module->memory()->TranslateVirtual(0x82189F2B);
+          auto heap = module->memory()->LookupHeap(patch_addr);
+
+          uint32_t old_protect = 0;
+          heap->Protect(patch_addr, 1, kMemoryProtectRead | kMemoryProtectWrite,
+                        &old_protect);
+          *patch_ptr = 0;
+          heap->Protect(patch_addr, 1, old_protect);
         }
       }
     }
