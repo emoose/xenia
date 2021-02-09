@@ -38,22 +38,25 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
     std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
 
     MouseEvent mouse;
-    mouse.x = evt->x();
-    mouse.y = evt->y();
-    mouse.dx = evt->dx();
-    mouse.dy = evt->dy();
+    mouse.x_delta = evt->x();
+    mouse.y_delta = evt->y();
+    mouse.buttons = evt->dx();
+    mouse.wheel_delta = evt->dy();
     mouse_events_.push(mouse);
 
-    if ((mouse.dx & RI_MOUSE_LEFT_BUTTON_DOWN) == RI_MOUSE_LEFT_BUTTON_DOWN) {
+    if ((mouse.buttons & RI_MOUSE_LEFT_BUTTON_DOWN) ==
+        RI_MOUSE_LEFT_BUTTON_DOWN) {
       mouse_left_click_ = true;
     }
-    if ((mouse.dx & RI_MOUSE_LEFT_BUTTON_UP) == RI_MOUSE_LEFT_BUTTON_UP) {
+    if ((mouse.buttons & RI_MOUSE_LEFT_BUTTON_UP) == RI_MOUSE_LEFT_BUTTON_UP) {
       mouse_left_click_ = false;
     }
-    if ((mouse.dx & RI_MOUSE_RIGHT_BUTTON_DOWN) == RI_MOUSE_RIGHT_BUTTON_DOWN) {
+    if ((mouse.buttons & RI_MOUSE_RIGHT_BUTTON_DOWN) ==
+        RI_MOUSE_RIGHT_BUTTON_DOWN) {
       mouse_right_click_ = true;
     }
-    if ((mouse.dx & RI_MOUSE_RIGHT_BUTTON_UP) == RI_MOUSE_RIGHT_BUTTON_UP) {
+    if ((mouse.buttons & RI_MOUSE_RIGHT_BUTTON_UP) ==
+        RI_MOUSE_RIGHT_BUTTON_UP) {
       mouse_right_click_ = false;
     }
   });
@@ -144,24 +147,16 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
   if (window()->has_focus() && is_active()) {
     int32_t mouse_x_delta = 0;
     int32_t mouse_y_delta = 0;
-    int32_t mouse_dy_delta = 0;
+    int32_t mouse_wheel_delta = 0;
 
     {
       std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
       while (!mouse_events_.empty()) {
         auto& mouse = mouse_events_.front();
-        mouse_x_delta += mouse.x;
-        mouse_y_delta += mouse.y;
-        mouse_dy_delta += mouse.dy;
+        mouse_x_delta += mouse.x_delta;
+        mouse_y_delta += mouse.y_delta;
+        mouse_wheel_delta += mouse.wheel_delta;
         mouse_events_.pop();
-      }
-
-      if (mouse_dy_delta != 0) {
-        if (mouse_dy_delta > 0) {
-          buttons |= 0x2000;  // XINPUT_GAMEPAD_B
-        } else {
-          buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
-        }
       }
 
       if ((!cvars::swap_buttons && mouse_left_click_) ||
@@ -172,38 +167,46 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
           (cvars::swap_buttons && mouse_left_click_)) {
         left_trigger = 0xFF;
       }
+    }
 
-      // GE007 mousehook hax - firstly check that this is the GE build
-      // TODO: get this from kernel_state->memory()? Not sure if
-      // xenia-hid-winkey is able to access that though
-      xe::be<uint32_t>* testAddr = (xe::be<uint32_t>*)0x18200336C;
-      if (*testAddr == 0x646c6f67 || *testAddr == 0x676f6c64) {
-        // Get addr of player base
-        xe::be<uint32_t> playerBaseAddr = *(xe::be<uint32_t>*)0x182F1FA98;
+    if (mouse_wheel_delta != 0) {
+      if (mouse_wheel_delta > 0) {
+        buttons |= 0x2000;  // XINPUT_GAMEPAD_B
+      } else {
+        buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
+      }
+    }
 
+    // GE007 mousehook hax - firstly check that this is the GE build
+    // TODO: get this from kernel_state->memory()? Not sure if
+    // xenia-hid-winkey is able to access that though
+    xe::be<uint32_t>* test_addr = (xe::be<uint32_t>*)0x18200336C;
+    if (*test_addr == 0x676f6c64) {
+      // Read addr of player base
+      xe::be<uint32_t> players_addr = *(xe::be<uint32_t>*)0x182F1FA98;
+
+      if (players_addr) {
         // Add xenia console memory base to the addr
-        uint8_t* playerAddr = (uint8_t*)(playerBaseAddr + 0x100000000);
+        uint8_t* player = (uint8_t*)(players_addr + 0x100000000);
 
-        if (playerBaseAddr) {
-          xe::be<float>* playerCamX = (xe::be<float>*)(playerAddr + 0x254);
-          xe::be<float>* playerCamY = (xe::be<float>*)(playerAddr + 0x264);
+        xe::be<float>* player_cam_x = (xe::be<float>*)(player + 0x254);
+        xe::be<float>* player_cam_y = (xe::be<float>*)(player + 0x264);
 
-          // Have to do weird things converting it to normal float otherwise
-          // xe::be += treats things as int?
-          float camX = (float)*playerCamX;
-          float camY = (float)*playerCamY;
+        // Have to do weird things converting it to normal float otherwise
+        // xe::be += treats things as int?
+        float camX = (float)*player_cam_x;
+        float camY = (float)*player_cam_y;
 
-          camX += (((float)mouse_x_delta) / 10.f) * (float)cvars::sensitivity;
+        camX += (((float)mouse_x_delta) / 10.f) * (float)cvars::sensitivity;
 
-          if (!cvars::invert_y) {
-            camY -= (((float)mouse_y_delta) / 10.f) * (float)cvars::sensitivity;
-          } else {
-            camY += (((float)mouse_y_delta) / 10.f) * (float)cvars::sensitivity;
-          }
-
-          *playerCamX = camX;
-          *playerCamY = camY;
+        if (!cvars::invert_y) {
+          camY -= (((float)mouse_y_delta) / 10.f) * (float)cvars::sensitivity;
+        } else {
+          camY += (((float)mouse_y_delta) / 10.f) * (float)cvars::sensitivity;
         }
+
+        *player_cam_x = camX;
+        *player_cam_y = camY;
       }
     }
 
