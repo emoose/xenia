@@ -13,6 +13,7 @@
 #include "xenia/hid/hid_flags.h"
 #include "xenia/hid/input_system.h"
 #include "xenia/ui/window.h"
+#include "xenia/ui/window_win.h"
 
 namespace xe {
 namespace hid {
@@ -21,7 +22,7 @@ namespace winkey {
 WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
     : InputDriver(window), packet_number_(1) {
   // Register a key listener.
-  window->on_mouse_move.AddListener([this](ui::MouseEvent* evt) {
+  window->on_mouse_move.AddListener([this, window](ui::MouseEvent* evt) {
     if (!is_active()) {
       return;
     }
@@ -30,6 +31,62 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
 
     latest_mouse_.x = evt->x();
     latest_mouse_.y = evt->y();
+
+    auto* wnd = (xe::ui::Win32Window*)window;
+
+    // This only captures pointer position inside the game window atm
+    // In fullscreen this means edges of the screen would stop pointer from
+    // moving, so we wouldn't be able to detect any mouse movement...
+    // As a workaround, move pointer to opposite side of the screen when it 
+    // gets close to an edge
+    // Pretty hacky but seems to work out fine.
+
+    // TODO: Increase the area we decide to move the cursor inside
+    // (then we can maybe work out how far inside that area the cursor moved,
+    // and apply that movement to the pointer on the opposite side, which 
+    // would maybe make it smoother?)
+
+    if (wnd->is_fullscreen()) {
+      RECT r;
+      GetWindowRect(wnd->hwnd(), &r);
+
+      auto wnd_height = window->scaled_height();
+      auto wnd_width = window->scaled_width();
+
+      bool move_pointer = false;
+      int new_x = 0;
+      int new_y = 0;
+
+      if (latest_mouse_.x <= 5) {
+        move_pointer = true;
+        new_x = wnd_width - 6;
+        new_y = latest_mouse_.y;
+      }
+      if (latest_mouse_.y <= 5) {
+        move_pointer = true;
+        new_x = latest_mouse_.x;
+        new_y = wnd_height - 6;
+      }
+      if (latest_mouse_.x >= wnd_width - 5) {
+        move_pointer = true;
+        new_x = 6;
+        new_y = latest_mouse_.y;
+      }
+      if (latest_mouse_.y >= wnd_height - 5) {
+        move_pointer = true;
+        new_x = latest_mouse_.x;
+        new_y = 6;
+      }
+
+      if (move_pointer) {
+        SetCursorPos(r.left + new_x, r.top + new_y);
+
+        // Set prev & latest mouse to our new position
+        // So the game hopefully never sees this position update
+        prev_mouse_.x = latest_mouse_.x = new_x;
+        prev_mouse_.y = latest_mouse_.y = new_y;
+      }
+    }
   });
 
   window->on_mouse_wheel.AddListener([this](ui::MouseEvent* evt) {
@@ -171,36 +228,37 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
       if (latest_mouse_.right_click) {
         left_trigger = 0xFF;
       }
-    }
 
-    // GE007 mousehook hax - firstly check that this is the GE build
-    // TODO: get this from kernel_state->memory()? Not sure if xenia-hid-winkey is able to access that though
-    xe::be<uint32_t>* testAddr = (xe::be<uint32_t>*)0x18200336C;
-    if (*testAddr == 0x646c6f67 || *testAddr == 0x676f6c64) {
+      // GE007 mousehook hax - firstly check that this is the GE build
+      // TODO: get this from kernel_state->memory()? Not sure if
+      // xenia-hid-winkey is able to access that though
+      xe::be<uint32_t>* testAddr = (xe::be<uint32_t>*)0x18200336C;
+      if (*testAddr == 0x646c6f67 || *testAddr == 0x676f6c64) {
+        // Get addr of player base
+        xe::be<uint32_t> playerBaseAddr = *(xe::be<uint32_t>*)0x182F1FA98;
 
-      // Get addr of player base
-      xe::be<uint32_t> playerBaseAddr = *(xe::be<uint32_t>*)0x182F1FA98;
+        // Add xenia console memory base to the addr
+        uint8_t* playerAddr = (uint8_t*)(playerBaseAddr + 0x100000000);
 
-      // Add xenia console memory base to the addr
-      uint8_t* playerAddr = (uint8_t*)(playerBaseAddr + 0x100000000);
+        if (playerBaseAddr && prev_set_) {
+          xe::be<float>* playerCamX = (xe::be<float>*)(playerAddr + 0x254);
+          xe::be<float>* playerCamY = (xe::be<float>*)(playerAddr + 0x264);
 
-      if (playerBaseAddr && prev_set_) {
-        xe::be<float>* playerCamX = (xe::be<float>*)(playerAddr + 0x254);
-        xe::be<float>* playerCamY = (xe::be<float>*)(playerAddr + 0x264);
+          // Have to do weird things converting it to normal float otherwise
+          // xe::be += treats things as int?
+          float camX = (float)*playerCamX;
+          float camY = (float)*playerCamY;
 
-        // Have to do weird things converting it to normal float otherwise xe::be += treats things as int?
-        float camX = (float)*playerCamX;
-        float camY = (float)*playerCamY;
+          camX += (((float)mouse_x_delta) / 10.f);
+          camY -= (((float)mouse_y_delta) / 10.f);
 
-        camX += (((float)mouse_x_delta) * 0.5f);
-        camY -= (((float)mouse_y_delta) * 0.5f);
-
-        *playerCamX = camX;
-        *playerCamY = camY;
+          *playerCamX = camX;
+          *playerCamY = camY;
+        }
       }
-    }
 
-    prev_set_ = true;
+      prev_set_ = true;
+    }
 
     if (IS_KEY_TOGGLED(VK_CAPITAL) || IS_KEY_DOWN(VK_SHIFT)) {
       // Right stick toggled
