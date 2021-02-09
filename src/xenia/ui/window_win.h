@@ -90,6 +90,8 @@ class Win32Window : public Window {
   WINDOWPLACEMENT windowed_pos_ = {0};
   POINT last_mouse_pos_ = {0};
 
+  std::vector<uint8_t> rawinput_data_;
+
   void* SetProcessDpiAwareness_ = nullptr;
   void* GetDpiForMonitor_ = nullptr;
 };
