@@ -524,7 +524,7 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
 
         auto e = MouseEvent(this, MouseEvent::Button::kNone, mouseData.lLastX,
                             mouseData.lLastY, mouseData.usButtonFlags,
-                            mouseData.usButtonData);
+                            (int16_t)mouseData.usButtonData);
         OnRawMouseMove(&e);
       }
 
