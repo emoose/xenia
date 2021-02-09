@@ -21,6 +21,54 @@ namespace winkey {
 WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
     : InputDriver(window), packet_number_(1) {
   // Register a key listener.
+  window->on_mouse_move.AddListener([this](ui::MouseEvent* evt) {
+    if (!is_active()) {
+      return;
+    }
+
+    std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
+
+    latest_mouse_.x = evt->x();
+    latest_mouse_.y = evt->y();
+  });
+
+  window->on_mouse_wheel.AddListener([this](ui::MouseEvent* evt) {
+    if (!is_active()) {
+      return;
+    }
+
+    std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
+
+    latest_mouse_.dx = evt->dx();
+    latest_mouse_.dy = evt->dy();
+  });
+
+  window->on_mouse_down.AddListener([this](ui::MouseEvent* evt) {
+    if (!is_active()) {
+      return;
+    }
+    std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
+
+    if (evt->button() == xe::ui::MouseEvent::Button::kLeft) {
+      latest_mouse_.left_click = true;
+    } else if (evt->button() == xe::ui::MouseEvent::Button::kRight) {
+      latest_mouse_.right_click = true;
+    }
+  });
+
+  window->on_mouse_up.AddListener([this](ui::MouseEvent* evt) {
+    if (!is_active()) {
+      return;
+    }
+    std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
+
+    if (evt->button() == xe::ui::MouseEvent::Button::kLeft) {
+      latest_mouse_.left_click = false;
+    } else if (evt->button() == xe::ui::MouseEvent::Button::kRight) {
+      latest_mouse_.right_click = false;
+    }
+  });
+
   window->on_key_down.AddListener([this](ui::KeyEvent* evt) {
     if (!is_active()) {
       return;
@@ -97,23 +145,80 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
   int16_t thumb_ry = 0;
 
   if (window()->has_focus() && is_active()) {
-    if (IS_KEY_TOGGLED(VK_CAPITAL) || IS_KEY_DOWN(VK_SHIFT)) {
-      // dpad toggled
-      if (IS_KEY_DOWN('A')) {
-        // A
-        buttons |= 0x0004;  // XINPUT_GAMEPAD_DPAD_LEFT
+    int32_t mouse_x_delta;
+    int32_t mouse_y_delta;
+
+    {
+      std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
+      mouse_x_delta = latest_mouse_.x - prev_mouse_.x;
+      mouse_y_delta = latest_mouse_.y - prev_mouse_.y;
+
+      prev_mouse_.x = latest_mouse_.x;
+      prev_mouse_.y = latest_mouse_.y;
+
+      if (latest_mouse_.dy != 0) {
+        if (latest_mouse_.dy > 0) {
+          buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
+        } else {
+          buttons |= 0x2000;  // XINPUT_GAMEPAD_B
+        }
+        latest_mouse_.dy = 0;
       }
-      if (IS_KEY_DOWN('D')) {
-        // D
-        buttons |= 0x0008;  // XINPUT_GAMEPAD_DPAD_RIGHT
+
+      if (latest_mouse_.left_click) {
+        right_trigger = 0xFF;
+      }
+      if (latest_mouse_.right_click) {
+        left_trigger = 0xFF;
+      }
+    }
+
+    // GE007 mousehook hax - firstly check that this is the GE build
+    // TODO: get this from kernel_state->memory()? Not sure if xenia-hid-winkey is able to access that though
+    xe::be<uint32_t>* testAddr = (xe::be<uint32_t>*)0x18200336C;
+    if (*testAddr == 0x646c6f67 || *testAddr == 0x676f6c64) {
+
+      // Get addr of player base
+      xe::be<uint32_t> playerBaseAddr = *(xe::be<uint32_t>*)0x182F1FA98;
+
+      // Add xenia console memory base to the addr
+      uint8_t* playerAddr = (uint8_t*)(playerBaseAddr + 0x100000000);
+
+      if (playerBaseAddr && prev_set_) {
+        xe::be<float>* playerCamX = (xe::be<float>*)(playerAddr + 0x254);
+        xe::be<float>* playerCamY = (xe::be<float>*)(playerAddr + 0x264);
+
+        // Have to do weird things converting it to normal float otherwise xe::be += treats things as int?
+        float camX = (float)*playerCamX;
+        float camY = (float)*playerCamY;
+
+        camX += (((float)mouse_x_delta) * 0.5f);
+        camY -= (((float)mouse_y_delta) * 0.5f);
+
+        *playerCamX = camX;
+        *playerCamY = camY;
+      }
+    }
+
+    prev_set_ = true;
+
+    if (IS_KEY_TOGGLED(VK_CAPITAL) || IS_KEY_DOWN(VK_SHIFT)) {
+      // Right stick toggled
+      if (IS_KEY_DOWN('W')) {
+        // Up
+        thumb_ry += SHRT_MAX;
       }
       if (IS_KEY_DOWN('S')) {
-        // S
-        buttons |= 0x0002;  // XINPUT_GAMEPAD_DPAD_DOWN
+        // Down
+        thumb_ry += SHRT_MIN;
       }
-      if (IS_KEY_DOWN('W')) {
-        // W
-        buttons |= 0x0001;  // XINPUT_GAMEPAD_DPAD_UP
+      if (IS_KEY_DOWN('D')) {
+        // Right
+        thumb_rx += SHRT_MAX;
+      }
+      if (IS_KEY_DOWN('A')) {
+        // Left
+        thumb_rx += SHRT_MIN;
       }
     } else {
       // left stick
@@ -135,52 +240,52 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
       }
     }
 
-    if (IS_KEY_DOWN('F')) {
-      // F
+    if (IS_KEY_DOWN(VK_CONTROL) || IS_KEY_DOWN('C')) {
+      // CTRL/C
       buttons |= 0x0040;  // XINPUT_GAMEPAD_LEFT_THUMB
     }
 
-    // Right stick
+    // DPad
     if (IS_KEY_DOWN(VK_UP)) {
       // Up
-      thumb_ry += SHRT_MAX;
+      buttons |= 0x0001;  // XINPUT_GAMEPAD_DPAD_UP
     }
     if (IS_KEY_DOWN(VK_DOWN)) {
       // Down
-      thumb_ry += SHRT_MIN;
+      buttons |= 0x0002;  // XINPUT_GAMEPAD_DPAD_DOWN
     }
     if (IS_KEY_DOWN(VK_RIGHT)) {
       // Right
-      thumb_rx += SHRT_MAX;
+      buttons |= 0x0008;  // XINPUT_GAMEPAD_DPAD_RIGHT
     }
     if (IS_KEY_DOWN(VK_LEFT)) {
       // Left
-      thumb_rx += SHRT_MIN;
+      buttons |= 0x0004;  // XINPUT_GAMEPAD_DPAD_LEFT
     }
 
-    if (IS_KEY_DOWN('L')) {
-      // L
+    if (IS_KEY_DOWN('R')) {
+      // R
       buttons |= 0x4000;  // XINPUT_GAMEPAD_X
     }
-    if (IS_KEY_DOWN(VK_OEM_7)) {
-      // '
+    if (IS_KEY_DOWN('Q')) {
+      // Q
       buttons |= 0x2000;  // XINPUT_GAMEPAD_B
     }
-    if (IS_KEY_DOWN(VK_OEM_1)) {
-      // ;
+    if (IS_KEY_DOWN('E')) {
+      // E
       buttons |= 0x1000;  // XINPUT_GAMEPAD_A
     }
-    if (IS_KEY_DOWN('P')) {
-      // P
+    if (IS_KEY_DOWN(VK_SPACE)) {
+      // Space
       buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
     }
 
-    if (IS_KEY_DOWN('K')) {
-      // K
+    if (IS_KEY_DOWN('V')) {
+      // V
       buttons |= 0x0080;  // XINPUT_GAMEPAD_RIGHT_THUMB
     }
 
-    if (IS_KEY_DOWN('Q') || IS_KEY_DOWN('I')) {
+    /*if (IS_KEY_DOWN('Q') || IS_KEY_DOWN('I')) {
       // Q / I
       left_trigger = 0xFF;
     }
@@ -188,7 +293,7 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
     if (IS_KEY_DOWN('E') || IS_KEY_DOWN('O')) {
       // E / O
       right_trigger = 0xFF;
-    }
+    }*/
 
     if (IS_KEY_DOWN('Z')) {
       // Z
