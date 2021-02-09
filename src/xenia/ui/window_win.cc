@@ -128,13 +128,18 @@ bool Win32Window::OnCreate() {
   // Enable file dragging from external sources
   DragAcceptFiles(hwnd_, true);
 
-  // Enable raw input
+  // Enable raw input for mouse & keyboard
   RAWINPUTDEVICE device;
-  device.usUsagePage = 0x01;
-  device.usUsage = 0x02;
+  device.usUsagePage = 0x01;  // HID_USAGE_PAGE_GENERIC
+  device.usUsage = 0x02;      // HID_USAGE_GENERIC_MOUSE
   device.dwFlags = 0;
   device.hwndTarget = 0;
-  RegisterRawInputDevices(&device, 1, sizeof device);
+  RegisterRawInputDevices(&device, 1, sizeof(RAWINPUTDEVICE));
+  device.usUsagePage = 0x01;  // HID_USAGE_PAGE_GENERIC
+  device.usUsage = 0x06;      // HID_USAGE_GENERIC_KEYBOARD
+  device.dwFlags = 0;
+  device.hwndTarget = 0;
+  RegisterRawInputDevices(&device, 1, sizeof(RAWINPUTDEVICE));
 
   ShowWindow(hwnd_, SW_SHOWNORMAL);
   UpdateWindow(hwnd_);
@@ -520,12 +525,19 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
 
       const RAWINPUT* raw = (const RAWINPUT*)rawinput_data_.data();
       if (raw->header.dwType == RIM_TYPEMOUSE) {
-        const RAWMOUSE& mouseData = raw->data.mouse;
+        const auto& mouseData = raw->data.mouse;
 
         auto e = MouseEvent(this, MouseEvent::Button::kNone, mouseData.lLastX,
                             mouseData.lLastY, mouseData.usButtonFlags,
                             (int16_t)mouseData.usButtonData);
-        OnRawMouseMove(&e);
+        OnRawMouse(&e);
+      } else if (raw->header.dwType == RIM_TYPEKEYBOARD) {
+        const auto& keyData = raw->data.keyboard;
+
+        auto e = KeyEvent(this, keyData.VKey, 0, !keyData.Flags, false, false,
+                          false, false);
+
+        OnRawKeyboard(&e);
       }
 
     } break;

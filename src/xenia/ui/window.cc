@@ -352,13 +352,24 @@ void Window::OnMouseWheel(MouseEvent* e) {
   });
 }
 
-void Window::OnRawMouseMove(MouseEvent* e) {
-  on_raw_mouse_move(e);
+void Window::OnRawMouse(MouseEvent* e) {
+  on_raw_mouse(e);
   if (e->is_handled()) {
     return;
   }
   TryForEachListener([e](auto listener) {
-    listener->OnRawMouseMove(e);
+    listener->OnRawMouse(e);
+    return e->is_handled();
+  });
+}
+
+void Window::OnRawKeyboard(KeyEvent* e) {
+  on_raw_keyboard(e);
+  if (e->is_handled()) {
+    return;
+  }
+  TryForEachListener([e](auto listener) {
+    listener->OnRawKeyboard(e);
     return e->is_handled();
   });
 }

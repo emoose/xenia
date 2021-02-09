@@ -132,7 +132,9 @@ class Window {
   Delegate<MouseEvent*> on_mouse_move;
   Delegate<MouseEvent*> on_mouse_up;
   Delegate<MouseEvent*> on_mouse_wheel;
-  Delegate<MouseEvent*> on_raw_mouse_move;
+
+  Delegate<MouseEvent*> on_raw_mouse;
+  Delegate<KeyEvent*> on_raw_keyboard;
 
  protected:
   Window(Loop* loop, const std::string& title);
@@ -168,7 +170,8 @@ class Window {
   virtual void OnMouseUp(MouseEvent* e);
   virtual void OnMouseWheel(MouseEvent* e);
 
-  virtual void OnRawMouseMove(MouseEvent* e);
+  virtual void OnRawMouse(MouseEvent* e);
+  virtual void OnRawKeyboard(KeyEvent* e);
 
   void OnKeyPress(KeyEvent* e, bool is_down, bool is_char);
 
