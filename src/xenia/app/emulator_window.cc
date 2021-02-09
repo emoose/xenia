@@ -166,13 +166,14 @@ bool EmulatorWindow::Initialize() {
   });
 
   window_->on_mouse_move.AddListener([this](MouseEvent* e) {
+    /*
     if (window_->is_fullscreen() && (e->dx() > 2 || e->dy() > 2)) {
       if (!window_->is_cursor_visible()) {
         window_->set_cursor_visible(true);
       }
 
       cursor_hide_time_ = Clock::QueryHostSystemTime() + 30000000;
-    }
+    }*/
 
     e->set_handled(false);
   });
@@ -416,7 +417,7 @@ void EmulatorWindow::ToggleFullscreen() {
   window_->ToggleFullscreen(!window_->is_fullscreen());
 
   // Hide the cursor after a second if we're going fullscreen
-  cursor_hide_time_ = Clock::QueryHostSystemTime() + 30000000;
+  cursor_hide_time_ = Clock::QueryHostSystemTime() + 15000000;
   if (!window_->is_fullscreen()) {
     window_->set_cursor_visible(true);
   }
