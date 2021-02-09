@@ -41,8 +41,22 @@ class WinKeyInputDriver : public InputDriver {
     bool prev_state = false;  // down(true) or up(false)
   };
 
+  struct MouseEvent {
+    int32_t x = 0;
+    int32_t y = 0;
+    int32_t dx = 0;
+    int32_t dy = 0;
+    bool left_click = false;
+    bool right_click = false;
+  };
+
   xe::global_critical_region global_critical_region_;
   std::queue<KeyEvent> key_events_;
+
+  std::mutex mouse_mutex_;
+  MouseEvent latest_mouse_;
+  MouseEvent prev_mouse_;
+  bool prev_set_ = false;
 
   uint32_t packet_number_;
 };
