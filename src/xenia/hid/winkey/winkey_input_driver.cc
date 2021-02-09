@@ -142,9 +142,9 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
 
       if (mouse_dy_delta != 0) {
         if (mouse_dy_delta > 0) {
-          buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
-        } else {
           buttons |= 0x2000;  // XINPUT_GAMEPAD_B
+        } else {
+          buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
         }
       }
 
