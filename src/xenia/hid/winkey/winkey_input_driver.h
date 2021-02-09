@@ -46,17 +46,15 @@ class WinKeyInputDriver : public InputDriver {
     int32_t y = 0;
     int32_t dx = 0;
     int32_t dy = 0;
-    bool left_click = false;
-    bool right_click = false;
   };
 
   xe::global_critical_region global_critical_region_;
   std::queue<KeyEvent> key_events_;
 
   std::mutex mouse_mutex_;
-  MouseEvent latest_mouse_;
-  MouseEvent prev_mouse_;
-  bool prev_set_ = false;
+  std::queue<MouseEvent> mouse_events_;
+  bool mouse_left_click_ = false;
+  bool mouse_right_click_ = false;
 
   uint32_t packet_number_;
 };

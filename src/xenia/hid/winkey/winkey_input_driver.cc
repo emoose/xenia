@@ -22,107 +22,31 @@ namespace winkey {
 WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
     : InputDriver(window), packet_number_(1) {
   // Register a key listener.
-  window->on_mouse_move.AddListener([this, window](ui::MouseEvent* evt) {
+  window->on_raw_mouse_move.AddListener([this, window](ui::MouseEvent* evt) {
     if (!is_active()) {
       return;
     }
 
     std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
 
-    latest_mouse_.x = evt->x();
-    latest_mouse_.y = evt->y();
+    MouseEvent mouse;
+    mouse.x = evt->x();
+    mouse.y = evt->y();
+    mouse.dx = evt->dx();
+    mouse.dy = evt->dy();
+    mouse_events_.push(mouse);
 
-    auto* wnd = (xe::ui::Win32Window*)window;
-
-    // This only captures pointer position inside the game window atm
-    // In fullscreen this means edges of the screen would stop pointer from
-    // moving, so we wouldn't be able to detect any mouse movement...
-    // As a workaround, move pointer to opposite side of the screen when it 
-    // gets close to an edge
-    // Pretty hacky but seems to work out fine.
-
-    // TODO: Increase the area we decide to move the cursor inside
-    // (then we can maybe work out how far inside that area the cursor moved,
-    // and apply that movement to the pointer on the opposite side, which 
-    // would maybe make it smoother?)
-
-    if (wnd->is_fullscreen()) {
-      RECT r;
-      GetWindowRect(wnd->hwnd(), &r);
-
-      auto wnd_height = window->scaled_height();
-      auto wnd_width = window->scaled_width();
-
-      bool move_pointer = false;
-      int new_x = 0;
-      int new_y = 0;
-
-      if (latest_mouse_.x <= 5) {
-        move_pointer = true;
-        new_x = wnd_width - 6;
-        new_y = latest_mouse_.y;
-      }
-      if (latest_mouse_.y <= 5) {
-        move_pointer = true;
-        new_x = latest_mouse_.x;
-        new_y = wnd_height - 6;
-      }
-      if (latest_mouse_.x >= wnd_width - 5) {
-        move_pointer = true;
-        new_x = 6;
-        new_y = latest_mouse_.y;
-      }
-      if (latest_mouse_.y >= wnd_height - 5) {
-        move_pointer = true;
-        new_x = latest_mouse_.x;
-        new_y = 6;
-      }
-
-      if (move_pointer) {
-        SetCursorPos(r.left + new_x, r.top + new_y);
-
-        // Set prev & latest mouse to our new position
-        // So the game hopefully never sees this position update
-        prev_mouse_.x = latest_mouse_.x = new_x;
-        prev_mouse_.y = latest_mouse_.y = new_y;
-      }
+    if ((mouse.dx & RI_MOUSE_LEFT_BUTTON_DOWN) == RI_MOUSE_LEFT_BUTTON_DOWN) {
+      mouse_left_click_ = true;
     }
-  });
-
-  window->on_mouse_wheel.AddListener([this](ui::MouseEvent* evt) {
-    if (!is_active()) {
-      return;
+    if ((mouse.dx & RI_MOUSE_LEFT_BUTTON_UP) == RI_MOUSE_LEFT_BUTTON_UP) {
+      mouse_left_click_ = false;
     }
-
-    std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
-
-    latest_mouse_.dx = evt->dx();
-    latest_mouse_.dy = evt->dy();
-  });
-
-  window->on_mouse_down.AddListener([this](ui::MouseEvent* evt) {
-    if (!is_active()) {
-      return;
+    if ((mouse.dx & RI_MOUSE_RIGHT_BUTTON_DOWN) == RI_MOUSE_RIGHT_BUTTON_DOWN) {
+      mouse_right_click_ = true;
     }
-    std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
-
-    if (evt->button() == xe::ui::MouseEvent::Button::kLeft) {
-      latest_mouse_.left_click = true;
-    } else if (evt->button() == xe::ui::MouseEvent::Button::kRight) {
-      latest_mouse_.right_click = true;
-    }
-  });
-
-  window->on_mouse_up.AddListener([this](ui::MouseEvent* evt) {
-    if (!is_active()) {
-      return;
-    }
-    std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
-
-    if (evt->button() == xe::ui::MouseEvent::Button::kLeft) {
-      latest_mouse_.left_click = false;
-    } else if (evt->button() == xe::ui::MouseEvent::Button::kRight) {
-      latest_mouse_.right_click = false;
+    if ((mouse.dx & RI_MOUSE_RIGHT_BUTTON_UP) == RI_MOUSE_RIGHT_BUTTON_UP) {
+      mouse_right_click_ = false;
     }
   });
 
@@ -202,30 +126,32 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
   int16_t thumb_ry = 0;
 
   if (window()->has_focus() && is_active()) {
-    int32_t mouse_x_delta;
-    int32_t mouse_y_delta;
+    int32_t mouse_x_delta = 0;
+    int32_t mouse_y_delta = 0;
+    int32_t mouse_dy_delta = 0;
 
     {
       std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
-      mouse_x_delta = latest_mouse_.x - prev_mouse_.x;
-      mouse_y_delta = latest_mouse_.y - prev_mouse_.y;
+      while (!mouse_events_.empty()) {
+        auto& mouse = mouse_events_.front();
+        mouse_x_delta += mouse.x;
+        mouse_y_delta += mouse.y;
+        mouse_dy_delta += mouse.dy;
+        mouse_events_.pop();
+      }
 
-      prev_mouse_.x = latest_mouse_.x;
-      prev_mouse_.y = latest_mouse_.y;
-
-      if (latest_mouse_.dy != 0) {
-        if (latest_mouse_.dy > 0) {
+      if (mouse_dy_delta != 0) {
+        if (mouse_dy_delta > 0) {
           buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
         } else {
           buttons |= 0x2000;  // XINPUT_GAMEPAD_B
         }
-        latest_mouse_.dy = 0;
       }
 
-      if (latest_mouse_.left_click) {
+      if (mouse_left_click_) {
         right_trigger = 0xFF;
       }
-      if (latest_mouse_.right_click) {
+      if (mouse_right_click_) {
         left_trigger = 0xFF;
       }
 
@@ -240,7 +166,7 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
         // Add xenia console memory base to the addr
         uint8_t* playerAddr = (uint8_t*)(playerBaseAddr + 0x100000000);
 
-        if (playerBaseAddr && prev_set_) {
+        if (playerBaseAddr) {
           xe::be<float>* playerCamX = (xe::be<float>*)(playerAddr + 0x254);
           xe::be<float>* playerCamY = (xe::be<float>*)(playerAddr + 0x264);
 
@@ -256,8 +182,6 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
           *playerCamY = camY;
         }
       }
-
-      prev_set_ = true;
     }
 
     if (IS_KEY_TOGGLED(VK_CAPITAL) || IS_KEY_DOWN(VK_SHIFT)) {
