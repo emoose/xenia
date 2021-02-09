@@ -18,6 +18,10 @@
 DEFINE_bool(invert_y, false, "Invert mouse Y axis", "MouseHook");
 DEFINE_bool(swap_buttons, false, "Swap left & right click mouse buttons",
             "MouseHook");
+DEFINE_bool(swap_wheel, false,
+            "Swaps binds for wheel, so wheel up will go to next weapon & down "
+            "will go to prev",
+            "MouseHook");
 DEFINE_double(sensitivity, 1, "Mouse sensitivity", "MouseHook");
 
 namespace xe {
@@ -170,11 +174,15 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
     }
 
     if (mouse_wheel_delta != 0) {
+      if (cvars::swap_wheel) {
+        mouse_wheel_delta = -mouse_wheel_delta;
+      }
+
       if (mouse_wheel_delta > 0) {
-        buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
-      } else {
         buttons |= 0x8000;  // XINPUT_GAMEPAD_Y + RT
         right_trigger = 0xFF;
+      } else {
+        buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
       }
     }
 
@@ -307,11 +315,11 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
         right_trigger = 0xFF;
       }*/
 
-      if (IS_KEY_DOWN('Z')) {
+      if (IS_KEY_DOWN(VK_TAB)) {
         // Z
         buttons |= 0x0020;  // XINPUT_GAMEPAD_BACK
       }
-      if (IS_KEY_DOWN('X') || IS_KEY_DOWN(VK_RETURN)) {
+      if (IS_KEY_DOWN(VK_RETURN)) {
         // X
         buttons |= 0x0010;  // XINPUT_GAMEPAD_START
       }
