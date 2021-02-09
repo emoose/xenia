@@ -26,8 +26,11 @@ namespace winkey {
 
 WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
     : InputDriver(window), packet_number_(1) {
-  // Register a key listener.
-  window->on_raw_mouse_move.AddListener([this, window](ui::MouseEvent* evt) {
+
+  memset(key_states_, 0, 256);
+
+  // Register our event listeners
+  window->on_raw_mouse.AddListener([this](ui::MouseEvent* evt) {
     if (!is_active()) {
       return;
     }
@@ -53,6 +56,15 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
     if ((mouse.dx & RI_MOUSE_RIGHT_BUTTON_UP) == RI_MOUSE_RIGHT_BUTTON_UP) {
       mouse_right_click_ = false;
     }
+  });
+
+  window->on_raw_keyboard.AddListener([this, window](ui::KeyEvent* evt) {
+    if (!is_active()) {
+      return;
+    }
+
+    std::unique_lock<std::mutex> key_lock(key_mutex_);
+    key_states_[evt->key_code()] = evt->prev_state();
   });
 
   window->on_key_down.AddListener([this](ui::KeyEvent* evt) {
@@ -111,8 +123,7 @@ X_RESULT WinKeyInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
   return X_ERROR_SUCCESS;
 }
 
-#define IS_KEY_TOGGLED(key) ((GetKeyState(key) & 0x1) == 0x1)
-#define IS_KEY_DOWN(key) ((GetAsyncKeyState(key) & 0x8000) == 0x8000)
+#define IS_KEY_DOWN(key) (key_states_[key])
 
 X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
                                      X_INPUT_STATE* out_state) {
@@ -196,114 +207,118 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
       }
     }
 
-    if (IS_KEY_TOGGLED(VK_CAPITAL) || IS_KEY_DOWN(VK_SHIFT)) {
-      // Right stick toggled
-      if (IS_KEY_DOWN('W')) {
+    {
+      std::unique_lock<std::mutex> key_lock(key_mutex_);
+
+      if (IS_KEY_DOWN(VK_SHIFT)) {
+        // Right stick toggled
+        if (IS_KEY_DOWN('W')) {
+          // Up
+          thumb_ry += SHRT_MAX;
+        }
+        if (IS_KEY_DOWN('S')) {
+          // Down
+          thumb_ry += SHRT_MIN;
+        }
+        if (IS_KEY_DOWN('D')) {
+          // Right
+          thumb_rx += SHRT_MAX;
+        }
+        if (IS_KEY_DOWN('A')) {
+          // Left
+          thumb_rx += SHRT_MIN;
+        }
+      } else {
+        // left stick
+        if (IS_KEY_DOWN('A')) {
+          // A
+          thumb_lx += SHRT_MIN;
+        }
+        if (IS_KEY_DOWN('D')) {
+          // D
+          thumb_lx += SHRT_MAX;
+        }
+        if (IS_KEY_DOWN('S')) {
+          // S
+          thumb_ly += SHRT_MIN;
+        }
+        if (IS_KEY_DOWN('W')) {
+          // W
+          thumb_ly += SHRT_MAX;
+        }
+      }
+
+      if (IS_KEY_DOWN(VK_CONTROL) || IS_KEY_DOWN('C')) {
+        // CTRL/C
+        buttons |= 0x0040;  // XINPUT_GAMEPAD_LEFT_THUMB
+      }
+
+      // DPad
+      if (IS_KEY_DOWN(VK_UP)) {
         // Up
-        thumb_ry += SHRT_MAX;
+        buttons |= 0x0001;  // XINPUT_GAMEPAD_DPAD_UP
       }
-      if (IS_KEY_DOWN('S')) {
+      if (IS_KEY_DOWN(VK_DOWN)) {
         // Down
-        thumb_ry += SHRT_MIN;
+        buttons |= 0x0002;  // XINPUT_GAMEPAD_DPAD_DOWN
       }
-      if (IS_KEY_DOWN('D')) {
+      if (IS_KEY_DOWN(VK_RIGHT)) {
         // Right
-        thumb_rx += SHRT_MAX;
+        buttons |= 0x0008;  // XINPUT_GAMEPAD_DPAD_RIGHT
       }
-      if (IS_KEY_DOWN('A')) {
+      if (IS_KEY_DOWN(VK_LEFT)) {
         // Left
-        thumb_rx += SHRT_MIN;
+        buttons |= 0x0004;  // XINPUT_GAMEPAD_DPAD_LEFT
       }
-    } else {
-      // left stick
-      if (IS_KEY_DOWN('A')) {
-        // A
-        thumb_lx += SHRT_MIN;
+
+      if (IS_KEY_DOWN('R')) {
+        // R
+        buttons |= 0x4000;  // XINPUT_GAMEPAD_X
       }
-      if (IS_KEY_DOWN('D')) {
-        // D
-        thumb_lx += SHRT_MAX;
+      if (IS_KEY_DOWN('Q')) {
+        // Q
+        buttons |= 0x2000;  // XINPUT_GAMEPAD_B
       }
-      if (IS_KEY_DOWN('S')) {
-        // S
-        thumb_ly += SHRT_MIN;
+      if (IS_KEY_DOWN('E')) {
+        // E
+        buttons |= 0x1000;  // XINPUT_GAMEPAD_A
       }
-      if (IS_KEY_DOWN('W')) {
-        // W
-        thumb_ly += SHRT_MAX;
+      if (IS_KEY_DOWN(VK_SPACE)) {
+        // Space
+        buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
       }
-    }
 
-    if (IS_KEY_DOWN(VK_CONTROL) || IS_KEY_DOWN('C')) {
-      // CTRL/C
-      buttons |= 0x0040;  // XINPUT_GAMEPAD_LEFT_THUMB
-    }
+      if (IS_KEY_DOWN('V')) {
+        // V
+        buttons |= 0x0080;  // XINPUT_GAMEPAD_RIGHT_THUMB
+      }
 
-    // DPad
-    if (IS_KEY_DOWN(VK_UP)) {
-      // Up
-      buttons |= 0x0001;  // XINPUT_GAMEPAD_DPAD_UP
-    }
-    if (IS_KEY_DOWN(VK_DOWN)) {
-      // Down
-      buttons |= 0x0002;  // XINPUT_GAMEPAD_DPAD_DOWN
-    }
-    if (IS_KEY_DOWN(VK_RIGHT)) {
-      // Right
-      buttons |= 0x0008;  // XINPUT_GAMEPAD_DPAD_RIGHT
-    }
-    if (IS_KEY_DOWN(VK_LEFT)) {
-      // Left
-      buttons |= 0x0004;  // XINPUT_GAMEPAD_DPAD_LEFT
-    }
+      /*if (IS_KEY_DOWN('Q') || IS_KEY_DOWN('I')) {
+        // Q / I
+        left_trigger = 0xFF;
+      }
 
-    if (IS_KEY_DOWN('R')) {
-      // R
-      buttons |= 0x4000;  // XINPUT_GAMEPAD_X
-    }
-    if (IS_KEY_DOWN('Q')) {
-      // Q
-      buttons |= 0x2000;  // XINPUT_GAMEPAD_B
-    }
-    if (IS_KEY_DOWN('E')) {
-      // E
-      buttons |= 0x1000;  // XINPUT_GAMEPAD_A
-    }
-    if (IS_KEY_DOWN(VK_SPACE)) {
-      // Space
-      buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
-    }
+      if (IS_KEY_DOWN('E') || IS_KEY_DOWN('O')) {
+        // E / O
+        right_trigger = 0xFF;
+      }*/
 
-    if (IS_KEY_DOWN('V')) {
-      // V
-      buttons |= 0x0080;  // XINPUT_GAMEPAD_RIGHT_THUMB
-    }
-
-    /*if (IS_KEY_DOWN('Q') || IS_KEY_DOWN('I')) {
-      // Q / I
-      left_trigger = 0xFF;
-    }
-
-    if (IS_KEY_DOWN('E') || IS_KEY_DOWN('O')) {
-      // E / O
-      right_trigger = 0xFF;
-    }*/
-
-    if (IS_KEY_DOWN('Z')) {
-      // Z
-      buttons |= 0x0020;  // XINPUT_GAMEPAD_BACK
-    }
-    if (IS_KEY_DOWN('X')) {
-      // X
-      buttons |= 0x0010;  // XINPUT_GAMEPAD_START
-    }
-    if (IS_KEY_DOWN('1')) {
-      // 1
-      buttons |= 0x0100;  // XINPUT_GAMEPAD_LEFT_SHOULDER
-    }
-    if (IS_KEY_DOWN('3')) {
-      // 3
-      buttons |= 0x0200;  // XINPUT_GAMEPAD_RIGHT_SHOULDER
+      if (IS_KEY_DOWN('Z')) {
+        // Z
+        buttons |= 0x0020;  // XINPUT_GAMEPAD_BACK
+      }
+      if (IS_KEY_DOWN('X')) {
+        // X
+        buttons |= 0x0010;  // XINPUT_GAMEPAD_START
+      }
+      if (IS_KEY_DOWN('1')) {
+        // 1
+        buttons |= 0x0100;  // XINPUT_GAMEPAD_LEFT_SHOULDER
+      }
+      if (IS_KEY_DOWN('3')) {
+        // 3
+        buttons |= 0x0200;  // XINPUT_GAMEPAD_RIGHT_SHOULDER
+      }
     }
   }
 
@@ -357,40 +372,22 @@ X_RESULT WinKeyInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
     key_events_.pop();
   }
 
-  // TODO(DrChat): Some other way to toggle this...
-  if (IS_KEY_TOGGLED(VK_CAPITAL)) {
-    // dpad toggled
-    if (evt.vkey == (0x41)) {
-      // A
-      virtual_key = 0x5812;  // VK_PAD_DPAD_LEFT
-    } else if (evt.vkey == (0x44)) {
-      // D
-      virtual_key = 0x5813;  // VK_PAD_DPAD_RIGHT
-    } else if (evt.vkey == (0x53)) {
-      // S
-      virtual_key = 0x5811;  // VK_PAD_DPAD_DOWN
-    } else if (evt.vkey == (0x57)) {
-      // W
-      virtual_key = 0x5810;  // VK_PAD_DPAD_UP
-    }
-  } else {
-    // left stick
-    if (evt.vkey == (0x57)) {
-      // W
-      virtual_key = 0x5820;  // VK_PAD_LTHUMB_UP
-    }
-    if (evt.vkey == (0x53)) {
-      // S
-      virtual_key = 0x5821;  // VK_PAD_LTHUMB_DOWN
-    }
-    if (evt.vkey == (0x44)) {
-      // D
-      virtual_key = 0x5822;  // VK_PAD_LTHUMB_RIGHT
-    }
-    if (evt.vkey == (0x41)) {
-      // A
-      virtual_key = 0x5823;  // VK_PAD_LTHUMB_LEFT
-    }
+  // left stick
+  if (evt.vkey == (0x57)) {
+    // W
+    virtual_key = 0x5820;  // VK_PAD_LTHUMB_UP
+  }
+  if (evt.vkey == (0x53)) {
+    // S
+    virtual_key = 0x5821;  // VK_PAD_LTHUMB_DOWN
+  }
+  if (evt.vkey == (0x44)) {
+    // D
+    virtual_key = 0x5822;  // VK_PAD_LTHUMB_RIGHT
+  }
+  if (evt.vkey == (0x41)) {
+    // A
+    virtual_key = 0x5823;  // VK_PAD_LTHUMB_LEFT
   }
 
   // Right stick

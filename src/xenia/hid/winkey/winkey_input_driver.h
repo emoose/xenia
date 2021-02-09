@@ -56,6 +56,9 @@ class WinKeyInputDriver : public InputDriver {
   bool mouse_left_click_ = false;
   bool mouse_right_click_ = false;
 
+  std::mutex key_mutex_;
+  bool key_states_[256];
+
   uint32_t packet_number_;
 };
 
