@@ -352,5 +352,16 @@ void Window::OnMouseWheel(MouseEvent* e) {
   });
 }
 
+void Window::OnRawMouseMove(MouseEvent* e) {
+  on_raw_mouse_move(e);
+  if (e->is_handled()) {
+    return;
+  }
+  TryForEachListener([e](auto listener) {
+    listener->OnRawMouseMove(e);
+    return e->is_handled();
+  });
+}
+
 }  // namespace ui
 }  // namespace xe

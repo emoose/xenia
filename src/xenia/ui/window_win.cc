@@ -129,6 +129,14 @@ bool Win32Window::OnCreate() {
   // Enable file dragging from external sources
   DragAcceptFiles(hwnd_, true);
 
+  // Enable raw input
+  RAWINPUTDEVICE device;
+  device.usUsagePage = 0x01;
+  device.usUsage = 0x02;
+  device.dwFlags = 0;
+  device.hwndTarget = 0;
+  RegisterRawInputDevices(&device, 1, sizeof device);
+
   ShowWindow(hwnd_, SW_SHOWNORMAL);
   UpdateWindow(hwnd_);
 
@@ -495,6 +503,34 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
   }
 
   switch (message) {
+    case WM_INPUT: {
+      HRAWINPUT hRawInput = (HRAWINPUT)lParam;
+      UINT dataSize = 0;
+
+      GetRawInputData(hRawInput, RID_INPUT, NULL, &dataSize,
+                      sizeof(RAWINPUTHEADER));
+
+      if (dataSize == 0) {
+        break;
+      }
+      if (dataSize > rawinput_data_.size()) {
+        rawinput_data_.resize(dataSize);
+      }
+
+      GetRawInputData(hRawInput, RID_INPUT, rawinput_data_.data(), &dataSize,
+                      sizeof(RAWINPUTHEADER));
+
+      const RAWINPUT* raw = (const RAWINPUT*)rawinput_data_.data();
+      if (raw->header.dwType == RIM_TYPEMOUSE) {
+        const RAWMOUSE& mouseData = raw->data.mouse;
+
+        auto e = MouseEvent(this, MouseEvent::Button::kNone, mouseData.lLastX,
+                            mouseData.lLastY, mouseData.usButtonFlags,
+                            mouseData.usButtonData);
+        OnRawMouseMove(&e);
+      }
+
+    } break;
     case WM_DROPFILES: {
       HDROP drop_handle = reinterpret_cast<HDROP>(wParam);
       auto drop_count = DragQueryFileW(drop_handle, 0xFFFFFFFFu, nullptr, 0);
