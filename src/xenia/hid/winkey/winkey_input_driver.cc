@@ -16,6 +16,7 @@
 #include "xenia/ui/window_win.h"
 
 #include "xenia/hid/winkey/hookables/goldeneye.h"
+#include "xenia/hid/winkey/hookables/halo3.h"
 
 DEFINE_bool(invert_y, false, "Invert mouse Y axis", "MouseHook");
 DEFINE_bool(swap_buttons, false, "Swap left & right click mouse buttons",
@@ -37,6 +38,7 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
 
   // Register our supported hookable games
   hookable_games_.push_back(std::move(std::make_unique<GoldeneyeGame>()));
+  hookable_games_.push_back(std::move(std::make_unique<Halo3Game>()));
 
   // Register our event listeners
   window->on_raw_mouse.AddListener([this](ui::MouseEvent* evt) {
