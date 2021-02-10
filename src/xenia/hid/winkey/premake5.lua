@@ -10,6 +10,7 @@ project("xenia-hid-winkey")
     "xenia-base",
     "xenia-hid",
     "xenia-ui",
+    "xenia-kernel"
   })
   defines({
   })
