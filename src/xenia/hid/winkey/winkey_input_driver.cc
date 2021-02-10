@@ -15,6 +15,8 @@
 #include "xenia/ui/window.h"
 #include "xenia/ui/window_win.h"
 
+#include "xenia/hid/winkey/hookables/goldeneye.h"
+
 DEFINE_bool(invert_y, false, "Invert mouse Y axis", "MouseHook");
 DEFINE_bool(swap_buttons, false, "Swap left & right click mouse buttons",
             "MouseHook");
@@ -32,6 +34,9 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
     : InputDriver(window), packet_number_(1) {
 
   memset(key_states_, 0, 256);
+
+  // Register our supported hookable games
+  hookable_games_.push_back(std::move(std::make_unique<GoldeneyeGame>()));
 
   // Register our event listeners
   window->on_raw_mouse.AddListener([this](ui::MouseEvent* evt) {
@@ -148,77 +153,48 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
   int16_t thumb_rx = 0;
   int16_t thumb_ry = 0;
 
+  HookableGame* hookable_game = nullptr;
+
+  X_RESULT result = X_ERROR_SUCCESS;
+
   if (window()->has_focus() && is_active()) {
-    int32_t mouse_x_delta = 0;
-    int32_t mouse_y_delta = 0;
-    int32_t mouse_wheel_delta = 0;
+
+    RawInputState state;
 
     {
       std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
       while (!mouse_events_.empty()) {
         auto& mouse = mouse_events_.front();
-        mouse_x_delta += mouse.x_delta;
-        mouse_y_delta += mouse.y_delta;
-        mouse_wheel_delta += mouse.wheel_delta;
+        state.mouse.x_delta += mouse.x_delta;
+        state.mouse.y_delta += mouse.y_delta;
+        state.mouse.wheel_delta += mouse.wheel_delta;
         mouse_events_.pop();
       }
 
-      if ((!cvars::swap_buttons && mouse_left_click_) ||
-          (cvars::swap_buttons && mouse_right_click_)) {
-        right_trigger = 0xFF;
-      }
-      if ((!cvars::swap_buttons && mouse_right_click_) ||
-          (cvars::swap_buttons && mouse_left_click_)) {
-        left_trigger = 0xFF;
-      }
+      state.mouse_left_click = mouse_left_click_;
+      state.mouse_right_click = mouse_right_click_;
     }
 
-    if (mouse_wheel_delta != 0) {
+    if (state.mouse.wheel_delta != 0) {
       if (cvars::swap_wheel) {
-        mouse_wheel_delta = -mouse_wheel_delta;
-      }
-
-      if (mouse_wheel_delta > 0) {
-        buttons |= 0x8000;  // XINPUT_GAMEPAD_Y + RT
-        right_trigger = 0xFF;
-      } else {
-        buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
+        state.mouse.wheel_delta = -state.mouse.wheel_delta;
       }
     }
 
-    // GE007 mousehook hax - firstly check that this is the GE build
-    // TODO: get this from kernel_state->memory()? Not sure if
-    // xenia-hid-winkey is able to access that though
-    xe::be<uint32_t>* test_addr = (xe::be<uint32_t>*)0x18200336C;
-    if (*test_addr == 0x676f6c64) {
-      // Read addr of player base
-      xe::be<uint32_t> players_addr = *(xe::be<uint32_t>*)0x182F1FA98;
-
-      if (players_addr) {
-        // Add xenia console memory base to the addr
-        uint8_t* player = (uint8_t*)(players_addr + 0x100000000);
-
-        xe::be<float>* player_cam_x = (xe::be<float>*)(player + 0x254);
-        xe::be<float>* player_cam_y = (xe::be<float>*)(player + 0x264);
-
-        // Have to do weird things converting it to normal float otherwise
-        // xe::be += treats things as int?
-        float camX = (float)*player_cam_x;
-        float camY = (float)*player_cam_y;
-
-        camX += (((float)mouse_x_delta) / 10.f) * (float)cvars::sensitivity;
-
-        if (!cvars::invert_y) {
-          camY -= (((float)mouse_y_delta) / 10.f) * (float)cvars::sensitivity;
-        } else {
-          camY += (((float)mouse_y_delta) / 10.f) * (float)cvars::sensitivity;
-        }
-
-        *player_cam_x = camX;
-        *player_cam_y = camY;
+    // TODO: select game
+    for (auto& game : hookable_games_) {
+      if (game->IsGameSupported()) {
+        hookable_game = game.get();
       }
     }
 
+    if (hookable_game) {
+      std::unique_lock<std::mutex> key_lock(key_mutex_);
+      state.key_states = key_states_;
+
+      result = hookable_game->GetState(user_index, state, out_state);
+    }
+    else
     {
       std::unique_lock<std::mutex> key_lock(key_mutex_);
 
@@ -335,15 +311,17 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
   }
 
   out_state->packet_number = packet_number_;
-  out_state->gamepad.buttons = buttons;
-  out_state->gamepad.left_trigger = left_trigger;
-  out_state->gamepad.right_trigger = right_trigger;
-  out_state->gamepad.thumb_lx = thumb_lx;
-  out_state->gamepad.thumb_ly = thumb_ly;
-  out_state->gamepad.thumb_rx = thumb_rx;
-  out_state->gamepad.thumb_ry = thumb_ry;
+  if (!hookable_game) {
+    out_state->gamepad.buttons = buttons;
+    out_state->gamepad.left_trigger = left_trigger;
+    out_state->gamepad.right_trigger = right_trigger;
+    out_state->gamepad.thumb_lx = thumb_lx;
+    out_state->gamepad.thumb_ly = thumb_ly;
+    out_state->gamepad.thumb_rx = thumb_rx;
+    out_state->gamepad.thumb_ry = thumb_ry;
+  }
 
-  return X_ERROR_SUCCESS;
+  return result;
 }
 
 X_RESULT WinKeyInputDriver::SetState(uint32_t user_index,
