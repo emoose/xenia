@@ -14,6 +14,7 @@
 
 #include "xenia/base/mutex.h"
 #include "xenia/hid/input_driver.h"
+#include "xenia/hid/winkey/hookables/hookable_game.h"
 
 namespace xe {
 namespace hid {
@@ -21,6 +22,7 @@ namespace winkey {
 
 class WinKeyInputDriver : public InputDriver {
  public:
+
   explicit WinKeyInputDriver(xe::ui::Window* window);
   ~WinKeyInputDriver() override;
 
@@ -41,13 +43,6 @@ class WinKeyInputDriver : public InputDriver {
     bool prev_state = false;  // down(true) or up(false)
   };
 
-  struct MouseEvent {
-    int32_t x_delta = 0;
-    int32_t y_delta = 0;
-    int32_t buttons = 0;
-    int32_t wheel_delta = 0;
-  };
-
   xe::global_critical_region global_critical_region_;
   std::queue<KeyEvent> key_events_;
 
@@ -60,6 +55,8 @@ class WinKeyInputDriver : public InputDriver {
   bool key_states_[256];
 
   uint32_t packet_number_;
+
+  std::vector<std::unique_ptr<HookableGame>> hookable_games_;
 };
 
 }  // namespace winkey
