@@ -32,19 +32,41 @@ Halo3Game::~Halo3Game() = default;
 struct GameBuildAddrs {
   const char* build_string;
   uint32_t build_string_addr;
-  uint32_t input_globals_offset;
+  uint32_t input_globals_offset; // can be found near usage of "player control globals" string
   uint32_t camera_x_offset;
   uint32_t camera_y_offset;
 };
 
 std::map<Halo3Game::GameBuild, GameBuildAddrs> supported_builds{
   {
+    Halo3Game::GameBuild::Debug_08172,
+    {"08172.07.03.08.2240.delta__cache_debug", 0x820BA40C, 0x1A30, 0x1C, 0x20}
+  },
+  {
+    Halo3Game::GameBuild::Play_08172,
+    {"08172.07.03.08.2240.delta__cache_play", 0x820A1108, 0x1928, 0x1C, 0x20}
+  },
+  {
+    Halo3Game::GameBuild::Profile_08172,
+    {"08172.07.03.08.2240.delta__cache_profile", 0x8201979C, 0x12C, 0x1C, 0x20}
+  },
+  {
     Halo3Game::GameBuild::Release_08172,
     {"08172.07.03.08.2240.delta", 0x8205D39C, 0xC4, 0x1C, 0x20}
   },
   {
-    Halo3Game::GameBuild::Release_11855,
-    {"11855.07.08.20.2317.halo3_ship", 0x8203ADC8, 0x78, 0x1C, 0x20}
+    Halo3Game::GameBuild::Test_08172,
+    {"08172.07.03.08.2240.delta__cache_test", 0x820A8744, 0x1928, 0x1C, 0x20}
+  },
+  {
+    Halo3Game::GameBuild::Release_699E0227_11855,
+    {"11855.07.08.20.2317.halo3_ship__cache_release", 0x8203ADE8, 0x78, 0x1C,
+      0x20}
+  },
+  {
+    Halo3Game::GameBuild::Release_699E0227_12070,
+    {"12070.08.09.05.2031.halo3_ship__cache_release", 0x8203B3E4, 0x78, 0x1C,
+      0x20}
   }
 };
 
@@ -77,8 +99,9 @@ X_RESULT Halo3Game::GetState(uint32_t user_index,
 
   if (supported_builds.count(game_build_)) {
     // Doesn't seem to be any way to get tls_static_address_ besides this
-    // (XThread::GetTLSValue only returns tls_dynamic_address_, and doesn't seem
-    // to be any functions to get static_addr...)
+    // (XThread::GetTLSValue only returns tls_dynamic_address_, and doesn't
+    // seem to be any functions to get static_addr...)
+
     uint32_t pcr_addr =
         static_cast<uint32_t>(xe::kernel::XThread::GetCurrentThread()
                                   ->thread_state()
@@ -88,9 +111,8 @@ X_RESULT Halo3Game::GetState(uint32_t user_index,
     auto tls_addr =
         kernel_memory()->TranslateVirtual<X_KPCR*>(pcr_addr)->tls_ptr;
 
-    uint32_t global_addr =
-        *kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(
-            tls_addr + supported_builds[game_build_].input_globals_offset);
+    auto global_addr = *kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(
+        tls_addr + supported_builds[game_build_].input_globals_offset);
 
     if (global_addr) {
       auto* input_globals = kernel_memory()->TranslateVirtual(global_addr);
