@@ -20,8 +20,15 @@ class Halo3Game : public HookableGame {
  public:
   enum class GameBuild {
     Unknown,
-    Release_08172,  // March 8th 2007 (08172.07.03.08.2240.delta)
-    Release_11855   // August 20th 2007 (07.08.20.2317.halo3_ship) - TU0
+    Debug_08172,    // Mar  8 2007 (08172.07.03.08.2240.delta__cache_debug)
+    Play_08172,     // Mar  8 2007 (08172.07.03.08.2240.delta__cache_play)
+    Profile_08172,  // Mar  8 2007 (08172.07.03.08.2240.delta__cache_profile)
+    Release_08172,  // Mar  8 2007 (08172.07.03.08.2240.delta)
+    Test_08172,     // Mar  8 2007 (08172.07.03.08.2240.delta__cache_test)
+    Release_699E0227_11855,  // Aug 20 2007, TU0, media ID 699E0227, v0.0.0.42
+                             // (11855.07.08.20.2317.halo3_ship__cache_release)
+    Release_699E0227_12070   // Sep  5 2008, TU3, media ID 699E0227, v0.0.3.42
+                             // (12070.08.09.05.2031.halo3_ship__cache_release)
   };
 
   ~Halo3Game() override;
