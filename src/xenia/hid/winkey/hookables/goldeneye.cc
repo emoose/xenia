@@ -80,8 +80,10 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
 
   // Move menu selection crosshair
   // TODO: detect if we're actually in the menu first
-  auto menuX_ptr = kernel_memory()->TranslateVirtual<xe::be<float>*>(0x8272B37C);
-  auto menuY_ptr = kernel_memory()->TranslateVirtual<xe::be<float>*>(0x8272B380);
+  auto menuX_ptr =
+      kernel_memory()->TranslateVirtual<xe::be<float>*>(0x8272B37C);
+  auto menuY_ptr =
+      kernel_memory()->TranslateVirtual<xe::be<float>*>(0x8272B380);
   if (menuX_ptr && menuY_ptr) {
     float menuX = *menuX_ptr;
     float menuY = *menuY_ptr;
@@ -106,30 +108,72 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
     xe::be<float>* player_cam_x = (xe::be<float>*)(player + 0x254);
     xe::be<float>* player_cam_y = (xe::be<float>*)(player + 0x264);
 
-    // TODO:
-    // if((uint32_t)player[0x22C] == 1) == crosshair visible/aim mode enabled
-    // also seems crosshair position is stored in player struct, but gets
-    // overwritten every frame with data from controller... need to find where
-    // write happens and patch it!
+    xe::be<float>* player_crosshair_x = (xe::be<float>*)(player + 0x10A8);
+    xe::be<float>* player_crosshair_y = (xe::be<float>*)(player + 0x10AC);
+    xe::be<float>* player_gun_x = (xe::be<float>*)(player + 0x10BC);
+    xe::be<float>* player_gun_y = (xe::be<float>*)(player + 0x10C0);
+
+    uint32_t player_aim_mode = *(xe::be<uint32_t>*)(player + 0x22C);
+
+    if (player_aim_mode != prev_aim_mode_) {
+      // aim mode changed, reset it
+      *player_crosshair_x = 0;
+      *player_crosshair_y = 0;
+      *player_gun_x = 0;
+      *player_gun_y = 0;
+      prev_aim_mode_ = player_aim_mode;
+    }
 
     // Have to do weird things converting it to normal float otherwise
     // xe::be += treats things as int?
-    float camX = (float)*player_cam_x;
-    float camY = (float)*player_cam_y;
+    if (player_aim_mode == 1) {
+      // TODO: limit how far we move player_gun
+      // game seems to limit player_crosshair already, but seems we need to
+      // handle player_gun ourselves...
+      float chX = *player_crosshair_x;
+      float chY = *player_crosshair_y;
+      float gX = *player_gun_x;
+      float gY = *player_gun_y;
 
-    camX +=
-        (((float)input_state.mouse.x_delta) / 10.f) * (float)cvars::sensitivity;
+      chX += (((float)input_state.mouse.x_delta) / 500.f) *
+             (float)cvars::sensitivity;
+      gX += (((float)input_state.mouse.x_delta) / 500.f) *
+            (float)cvars::sensitivity;
 
-    if (!cvars::invert_y) {
-      camY -= (((float)input_state.mouse.y_delta) / 10.f) *
+      if (!cvars::invert_y) {
+        chY += (((float)input_state.mouse.y_delta) / 500.f) *
+               (float)cvars::sensitivity;
+        gY += (((float)input_state.mouse.y_delta) / 500.f) *
               (float)cvars::sensitivity;
+      } else {
+        chY -= (((float)input_state.mouse.y_delta) / 500.f) *
+               (float)cvars::sensitivity;
+        gY -= (((float)input_state.mouse.y_delta) / 500.f) *
+              (float)cvars::sensitivity;
+      }
+
+      *player_crosshair_x = chX;
+      *player_crosshair_y = chY;
+      *player_gun_x = gX;
+      *player_gun_y = gY;
     } else {
-      camY += (((float)input_state.mouse.y_delta) / 10.f) *
-              (float)cvars::sensitivity;
-    }
+      float camX = (float)*player_cam_x;
+      float camY = (float)*player_cam_y;
 
-    *player_cam_x = camX;
-    *player_cam_y = camY;
+      camX += (((float)input_state.mouse.x_delta) / 10.f) *
+              (float)cvars::sensitivity;
+
+      if (!cvars::invert_y) {
+        camY -= (((float)input_state.mouse.y_delta) / 10.f) *
+                (float)cvars::sensitivity;
+      } else {
+        camY += (((float)input_state.mouse.y_delta) / 10.f) *
+                (float)cvars::sensitivity;
+      }
+
+      *player_cam_x = camX;
+      *player_cam_y = camY;
+    }
   }
 
   if (IS_KEY_DOWN(VK_SHIFT)) {
