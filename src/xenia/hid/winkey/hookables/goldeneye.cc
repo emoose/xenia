@@ -77,6 +77,24 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
   }
 
   // GE007 mousehook hax
+
+  // Move menu selection crosshair
+  // TODO: detect if we're actually in the menu first
+  auto menuX_ptr = kernel_memory()->TranslateVirtual<xe::be<float>*>(0x8272B37C);
+  auto menuY_ptr = kernel_memory()->TranslateVirtual<xe::be<float>*>(0x8272B380);
+  if (menuX_ptr && menuY_ptr) {
+    float menuX = *menuX_ptr;
+    float menuY = *menuY_ptr;
+
+    menuX +=
+        (((float)input_state.mouse.x_delta) / 5.f) * (float)cvars::sensitivity;
+    menuY +=
+        (((float)input_state.mouse.y_delta) / 5.f) * (float)cvars::sensitivity;
+
+    *menuX_ptr = menuX;
+    *menuY_ptr = menuY;
+  }
+
   // Read addr of player base
   auto players_addr =
       *kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(0x82F1FA98);
