@@ -524,29 +524,32 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
       HRAWINPUT hRawInput = (HRAWINPUT)lParam;
       UINT dataSize = 0;
 
-      GetRawInputData(hRawInput, RID_INPUT, NULL, &dataSize,
-                      sizeof(RAWINPUTHEADER));
-
-      if (dataSize == 0) {
+      // Get size of the rawinput data
+      if (GetRawInputData(hRawInput, RID_INPUT, NULL, &dataSize,
+                          sizeof(RAWINPUTHEADER)) != 0 ||
+          dataSize == 0 || dataSize > sizeof(RAWINPUT)) {
+        // Unknown failure, exit out
+        assert_always();
         break;
       }
-      if (dataSize > rawinput_data_.size()) {
-        rawinput_data_.resize(dataSize);
+
+      // Now get the actual data itself
+      if (GetRawInputData(hRawInput, RID_INPUT, &rawinput_data_, &dataSize,
+                          sizeof(RAWINPUTHEADER)) == (UINT)-1) {
+        // Another unknown failure
+        assert_always();
+        break;
       }
 
-      GetRawInputData(hRawInput, RID_INPUT, rawinput_data_.data(), &dataSize,
-                      sizeof(RAWINPUTHEADER));
-
-      const RAWINPUT* raw = (const RAWINPUT*)rawinput_data_.data();
-      if (raw->header.dwType == RIM_TYPEMOUSE) {
-        const auto& mouseData = raw->data.mouse;
+      if (rawinput_data_.header.dwType == RIM_TYPEMOUSE) {
+        const auto& mouseData = rawinput_data_.data.mouse;
 
         auto e = MouseEvent(this, MouseEvent::Button::kNone, mouseData.lLastX,
                             mouseData.lLastY, mouseData.usButtonFlags,
                             (int16_t)mouseData.usButtonData);
         OnRawMouse(&e);
-      } else if (raw->header.dwType == RIM_TYPEKEYBOARD) {
-        const auto& keyData = raw->data.keyboard;
+      } else if (rawinput_data_.header.dwType == RIM_TYPEKEYBOARD) {
+        const auto& keyData = rawinput_data_.data.keyboard;
 
         auto e = KeyEvent(this, keyData.VKey, 0, !keyData.Flags, false, false,
                           false, false);
