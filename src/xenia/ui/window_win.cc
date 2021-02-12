@@ -548,6 +548,7 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
                             mouseData.lLastY, mouseData.usButtonFlags,
                             (int16_t)mouseData.usButtonData);
         OnRawMouse(&e);
+        return 0;
       } else if (rawinput_data_.header.dwType == RIM_TYPEKEYBOARD) {
         const auto& keyData = rawinput_data_.data.keyboard;
 
@@ -555,6 +556,7 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
                           false, false);
 
         OnRawKeyboard(&e);
+        return 0;
       }
 
     } break;
