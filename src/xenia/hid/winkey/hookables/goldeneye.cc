@@ -170,11 +170,41 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
 
       if (player_aim_mode != prev_aim_mode_) {
         // aim mode changed, reset it
-        *player_crosshair_x = 0;
-        *player_crosshair_y = 0;
-        *player_gun_x = 0;
-        *player_gun_y = 0;
+        if (player_aim_mode != 0) {
+          // Entering aim mode
+          *player_crosshair_x = 0;
+          *player_crosshair_y = 0;
+          *player_gun_x = 0;
+          *player_gun_y = 0;
+          player_exiting_aim_mode_ = false;
+        } else {
+          // Exiting aim mode
+          player_exiting_aim_mode_ = true;
+        }
         prev_aim_mode_ = player_aim_mode;
+      }
+
+      // Smoothly bring gun back to center
+      if (player_exiting_aim_mode_) {
+        if (*player_gun_x > 0) {
+          float gX = *player_gun_x - std::min(0.05f, (float)*player_gun_x);
+          *player_gun_x = gX;
+        }
+        if (*player_gun_x < 0) {
+          float gX = *player_gun_x + std::min(0.05f, -((float)*player_gun_x));
+          *player_gun_x = gX;
+        }
+        if (*player_gun_y > 0) {
+          float gX = *player_gun_y - std::min(0.05f, (float)*player_gun_y);
+          *player_gun_y = gX;
+        }
+        if (*player_gun_y < 0) {
+          float gX = *player_gun_y + std::min(0.05f, -((float)*player_gun_y));
+          *player_gun_y = gX;
+        }
+        if (*player_gun_y == 0 && *player_gun_x == 0) {
+          player_exiting_aim_mode_ = false;
+        }
       }
 
       // Have to do weird things converting it to normal float otherwise
