@@ -102,7 +102,6 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
       *kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(0x82F1FA98);
 
   if (players_addr) {
-    // Add xenia console memory base to the addr
     auto* player = kernel_memory()->TranslateVirtual(players_addr);
 
     xe::be<float>* player_cam_x = (xe::be<float>*)(player + 0x254);
@@ -127,9 +126,7 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
     // Have to do weird things converting it to normal float otherwise
     // xe::be += treats things as int?
     if (player_aim_mode == 1) {
-      // TODO: limit how far we move player_gun
-      // game seems to limit player_crosshair already, but seems we need to
-      // handle player_gun ourselves...
+
       float chX = *player_crosshair_x;
       float chY = *player_crosshair_y;
       float gX = *player_gun_x;
@@ -152,10 +149,59 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
               (float)cvars::sensitivity;
       }
 
+      // Keep the gun/crosshair in-bounds [1:-1]
+
+      if (chX > 1) {
+        chX = 1;
+      }
+      if (chX < -1) {
+        chX = -1;
+      }
+      if (chY > 1) {
+        chY = 1;
+      }
+      if (chY < -1) {
+        chY = -1;
+      }
+
+      if (gX > 1) {
+        gX = 1;
+      }
+      if (gX < -1) {
+        gX = -1;
+      }
+      if (gY > 1) {
+        gY = 1;
+      }
+      if (gY < -1) {
+        gY = -1;
+      }
+
       *player_crosshair_x = chX;
       *player_crosshair_y = chY;
       *player_gun_x = gX;
       *player_gun_y = gY;
+
+      // Move camera when crosshair is past a certain point
+      // TODO: figure out how the game itself does this, so we can match "show aim border"
+      // (right now this makes our border a rectangle, should be oval instead)
+      float camX = (float)*player_cam_x;
+      float camY = (float)*player_cam_y;
+
+      // this multiplier lets us slow down the movement when zoomed in
+      // value from this addr works but doesn't seem correct, seems too slow
+      // when zoomed, might be better to calculate it from FOV instead?
+      // (current_fov seems to be at 0x115C)
+      float aim_multiplier = *reinterpret_cast<xe::be<float>*>(player + 0x11AC);
+
+      if (chX > 0.4f || chX < -0.4f) {
+        camX += (chX * aim_multiplier);
+        *player_cam_x = camX;
+      }
+      if (chY > 0.5f || chY < -0.5f) {
+        camY -= (chY * aim_multiplier);
+        *player_cam_y = camY;
+      }
     } else {
       float camX = (float)*player_cam_x;
       float camY = (float)*player_cam_y;
