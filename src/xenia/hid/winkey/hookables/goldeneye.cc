@@ -20,6 +20,7 @@ using namespace xe::kernel;
 DECLARE_bool(swap_buttons);
 DECLARE_double(sensitivity);
 DECLARE_bool(invert_y);
+DECLARE_bool(disable_autoaim);
 
 DEFINE_double(
     aim_turn_distance, 0.4f,
@@ -143,8 +144,10 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
         };
 
         // Disable AutoAim & LookAhead
-        settings = settings & ~((uint32_t)GESettingFlag::AutoAim);
         settings = settings & ~((uint32_t)GESettingFlag::LookAhead);
+        if (cvars::disable_autoaim) {
+          settings = settings & ~((uint32_t)GESettingFlag::AutoAim);
+        }
 
         *settings_ptr = settings;
 
