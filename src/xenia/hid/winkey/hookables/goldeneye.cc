@@ -21,6 +21,11 @@ DECLARE_bool(swap_buttons);
 DECLARE_double(sensitivity);
 DECLARE_bool(invert_y);
 
+DEFINE_double(
+    aim_turn_distance, 0.4f,
+    "(GE) Distance crosshair can move in aim-mode before turning the camera",
+    "MouseHook");
+
 namespace xe {
 namespace hid {
 namespace winkey {
@@ -182,9 +187,7 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
       *player_gun_x = gX;
       *player_gun_y = gY;
 
-      // Move camera when crosshair is past a certain point
-      // TODO: figure out how the game itself does this, so we can match "show aim border"
-      // (right now this makes our border a rectangle, should be oval instead)
+      // Turn camera when crosshair is past a certain point
       float camX = (float)*player_cam_x;
       float camY = (float)*player_cam_y;
 
@@ -194,11 +197,16 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
       // (current_fov seems to be at 0x115C)
       float aim_multiplier = *reinterpret_cast<xe::be<float>*>(player + 0x11AC);
 
-      if (chX > 0.4f || chX < -0.4f) {
+      // This almost matches up with "show aim border" perfectly
+      // Except 0.4f will make Y move a little earlier than it should
+      // > 0.5f seems to work for Y, but then X needs to be moved further than
+      // it should need to...
+
+      // TODO: see if we can find the algo the game itself uses
+      float ch_distance = sqrtf((chX * chX) + (chY * chY));
+      if (ch_distance > cvars::aim_turn_distance) {
         camX += (chX * aim_multiplier);
         *player_cam_x = camX;
-      }
-      if (chY > 0.5f || chY < -0.5f) {
         camY -= (chY * aim_multiplier);
         *player_cam_y = camY;
       }
