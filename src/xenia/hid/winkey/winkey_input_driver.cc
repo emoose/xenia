@@ -26,6 +26,9 @@ DEFINE_bool(swap_wheel, false,
             "will go to prev",
             "MouseHook");
 DEFINE_double(sensitivity, 1, "Mouse sensitivity", "MouseHook");
+DEFINE_bool(disable_autoaim, true,
+            "Disable autoaim in games that support it (only GE currently)",
+            "MouseHook");
 
 namespace xe {
 namespace hid {
