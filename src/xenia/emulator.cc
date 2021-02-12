@@ -737,34 +737,34 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       auto* test_addr =
           (xe::be<uint32_t>*)module->memory()->TranslateVirtual(0x8200336C);
       if (*test_addr == 0x676f6c64) {
+
+        auto patch_addr = [module](uint32_t addr, uint32_t value) {
+          auto* patch_ptr =
+              (xe::be<uint32_t>*)module->memory()->TranslateVirtual(addr);
+          auto heap = module->memory()->LookupHeap(addr);
+
+          uint32_t old_protect = 0;
+          heap->Protect(addr, 4, kMemoryProtectRead | kMemoryProtectWrite,
+                        &old_protect);
+          *patch_ptr = value;
+          heap->Protect(addr, 4, old_protect);
+        };
+
+        // Prevent game from overwriting crosshair/gun positions
+        patch_addr(0x820A45D0, 0x4800003C);
+        patch_addr(0x820A46D4, 0x4800003C);
+
         if (cvars::remove_blur) {
           // Patch out N64 blur
           // Source:
           // https://github.com/xenia-canary/game-patches/blob/main/patches/584108A9.patch
 
-          const uint32_t patch_addr = 0x82188E70;
-          auto* patch_ptr =
-              (xe::be<uint32_t>*)module->memory()->TranslateVirtual(patch_addr);
-          auto heap = module->memory()->LookupHeap(patch_addr);
-
-          uint32_t old_protect = 0;
-          heap->Protect(patch_addr, 4, kMemoryProtectRead | kMemoryProtectWrite,
-                        &old_protect);
-          *patch_ptr = 0x60000000;
-          heap->Protect(patch_addr, 4, old_protect);
+          patch_addr(0x82188E70, 0x60000000);
         }
 
         if (cvars::debug_menu) {
           // Enable debug menu
-          const uint32_t patch_addr = 0x82189F2B;
-          auto* patch_ptr = module->memory()->TranslateVirtual(0x82189F2B);
-          auto heap = module->memory()->LookupHeap(patch_addr);
-
-          uint32_t old_protect = 0;
-          heap->Protect(patch_addr, 1, kMemoryProtectRead | kMemoryProtectWrite,
-                        &old_protect);
-          *patch_ptr = 0;
-          heap->Protect(patch_addr, 1, old_protect);
+          patch_addr(0x82189F28, 0x2B0B0000);
         }
       }
     }
