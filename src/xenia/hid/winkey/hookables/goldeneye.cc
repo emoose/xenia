@@ -169,11 +169,8 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
       uint32_t player_aim_mode = *(xe::be<uint32_t>*)(player + 0x22C);
 
       if (player_aim_mode != prev_aim_mode_) {
-        // aim mode changed, reset it
         if (player_aim_mode != 0) {
-          // Entering aim mode
-          *player_crosshair_x = 0;
-          *player_crosshair_y = 0;
+          // Entering aim mode, reset gun position
           *player_gun_x = 0;
           *player_gun_y = 0;
           player_exiting_aim_mode_ = false;
@@ -181,6 +178,10 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
           // Exiting aim mode
           player_exiting_aim_mode_ = true;
         }
+        // Always reset crosshair after entering/exiting aim mode
+        // Otherwise non-aim-mode will still fire toward it...
+        *player_crosshair_x = 0;
+        *player_crosshair_y = 0;
         prev_aim_mode_ = player_aim_mode;
       }
 
