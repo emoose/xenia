@@ -12,8 +12,8 @@
 #include "xenia/base/platform_win.h"
 #include "xenia/hid/hid_flags.h"
 #include "xenia/hid/input_system.h"
-#include "xenia/xbox.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/xbox.h"
 
 using namespace xe::kernel;
 
@@ -28,6 +28,10 @@ namespace winkey {
 GoldeneyeGame::~GoldeneyeGame() = default;
 
 bool GoldeneyeGame::IsGameSupported() {
+  if (kernel_state()->title_id() != 0x584108A9) {
+    return false;
+  }
+
   auto* check =
       kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(0x8200336C);
   if (!check) {
@@ -84,15 +88,23 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
     xe::be<float>* player_cam_x = (xe::be<float>*)(player + 0x254);
     xe::be<float>* player_cam_y = (xe::be<float>*)(player + 0x264);
 
+    // TODO:
+    // if((uint32_t)player[0x22C] == 1) == crosshair visible/aim mode enabled
+    // also seems crosshair position is stored in player struct, but gets
+    // overwritten every frame with data from controller... need to find where
+    // write happens and patch it!
+
     // Have to do weird things converting it to normal float otherwise
     // xe::be += treats things as int?
     float camX = (float)*player_cam_x;
     float camY = (float)*player_cam_y;
 
-    camX += (((float)input_state.mouse.x_delta) / 10.f) * (float)cvars::sensitivity;
+    camX +=
+        (((float)input_state.mouse.x_delta) / 10.f) * (float)cvars::sensitivity;
 
     if (!cvars::invert_y) {
-      camY -= (((float)input_state.mouse.y_delta) / 10.f) * (float)cvars::sensitivity;
+      camY -= (((float)input_state.mouse.y_delta) / 10.f) *
+              (float)cvars::sensitivity;
     } else {
       camY += (((float)input_state.mouse.y_delta) / 10.f) *
               (float)cvars::sensitivity;
@@ -223,7 +235,6 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
 
   return X_ERROR_SUCCESS;
 }
-
 
 }  // namespace winkey
 }  // namespace hid
