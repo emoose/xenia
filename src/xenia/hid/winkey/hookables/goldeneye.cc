@@ -102,6 +102,38 @@ X_RESULT GoldeneyeGame::GetState(uint32_t user_index,
     *menuY_ptr = menuY;
   }
 
+  // Disable auto-aim & lookahead
+  // TODO: only do this when we detect a change from menu/pause -> ingame
+  auto settings_addr =
+      *kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(0x83088228);
+
+  if (settings_addr) {
+    auto* settings_ptr = kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(
+        settings_addr + 0x298);
+    uint32_t settings = *settings_ptr;
+
+    enum GESettingFlag {
+      LookUpright = 0x8, // non-inverted
+      AutoAim = 0x10,
+      AimControlToggle = 0x20,
+      ShowAimCrosshair = 0x40,
+      LookAhead = 0x80,
+      ShowAmmoCounter = 0x100,
+      ShowAimBorder = 0x200,
+      ScreenLetterboxWide = 0x400,
+      ScreenLetterboxCinema = 0x800,
+      ScreenRatio16_9 = 0x1000,
+      ScreenRatio16_10 = 0x2000,
+      CameraRoll = 0x40000
+    };
+
+    // Disable AutoAim & LookAhead
+    settings = settings & ~((uint32_t)GESettingFlag::AutoAim);
+    settings = settings & ~((uint32_t)GESettingFlag::LookAhead);
+
+    *settings_ptr = settings;
+  }
+
   // Read addr of player base
   auto players_addr =
       *kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(0x82F1FA98);
