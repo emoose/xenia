@@ -182,7 +182,12 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
 
   // Read bindings file if it exists
   std::ifstream binds("bindings.ini");
-  if (binds.is_open()) {
+  if (!binds.is_open()) {
+    MessageBox(((xe::ui::Win32Window*)window)->hwnd(),
+               L"Xenia failed to load bindings.ini file, MouseHook won't have "
+               "any keys bound!",
+               L"Xenia", MB_ICONEXCLAMATION | MB_SYSTEMMODAL);
+  } else {
     std::string cur_section = "default";
     uint32_t cur_game = kTitleIdDefaultBindings;
     std::unordered_map<uint32_t, uint32_t> cur_binds;
