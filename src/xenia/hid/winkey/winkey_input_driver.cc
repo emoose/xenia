@@ -81,7 +81,7 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
     }
 
     std::unique_lock<std::mutex> key_lock(key_mutex_);
-    key_states_[evt->key_code()] = evt->prev_state();
+    key_states_[evt->key_code() & 0xFF] = evt->prev_state();
   });
 
   window->on_key_down.AddListener([this](ui::KeyEvent* evt) {

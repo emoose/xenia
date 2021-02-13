@@ -67,11 +67,32 @@ std::map<Halo3Game::GameBuild, GameBuildAddrs> supported_builds{
     Halo3Game::GameBuild::Release_699E0227_12070,
     {"12070.08.09.05.2031.halo3_ship__cache_release", 0x8203B3E4, 0x78, 0x1C,
       0x20}
+  },
+  {
+    Halo3Game::GameBuild::Release_152AB680_13895,
+    {"13895.09.04.27.2201.atlas_relea__cache_release", 0x82048E38, 0xA8, 0x8C,
+      0x90}
+  },
+  {
+    Halo3Game::GameBuild::Release_566C10D3_11860,
+    {"11860.10.07.24.0147.omaha_relea", 0x82048A54, 0x74, 0x94, 0x98}
+  },
+  {
+    Halo3Game::GameBuild::Release_566C10D3_12065,
+    {"12065.11.08.24.1738.tu1actual", 0x82048BCC, 0x74, 0x94, 0x98}
   }
 };
 
+const uint32_t kTitleIdHalo3 = 0x4D5307E6;
+const uint32_t kTitleIdHalo3ODST = 0x4D530877;
+const uint32_t kTitleIdHaloReach = 0x4D53085B;
+
 bool Halo3Game::IsGameSupported() {
-  if (kernel_state()->title_id() != 0x4D5307E6) {
+  auto title_id = kernel_state()->title_id();
+
+  if (title_id != kTitleIdHalo3 &&
+      title_id != kTitleIdHalo3ODST &&
+      title_id != kTitleIdHaloReach) {
     return false;
   }
 
