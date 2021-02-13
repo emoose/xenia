@@ -21,8 +21,7 @@ class GoldeneyeGame : public HookableGame {
   ~GoldeneyeGame() override;
 
   bool IsGameSupported();
-  X_RESULT GetState(uint32_t user_index, RawInputState& input_state,
-                    X_INPUT_STATE* out_state);
+  bool DoHooks(uint32_t user_index, RawInputState& input_state);
 
  private:
   uint32_t prev_aim_mode_ = 0;

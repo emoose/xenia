@@ -26,9 +26,18 @@ struct MouseEvent {
 
 struct RawInputState {
   MouseEvent mouse;
-  bool mouse_left_click = false;
-  bool mouse_right_click = false;
   bool* key_states;
+};
+
+// For per-game bindings
+// (if adding new game, make sure to update WinKeyInputDriver::WinKeyInputDriver!
+enum HookableGameIDs : uint32_t {
+  Unsupported = 0,
+  GoldenEye = 0x584108A9,
+  Halo3 = 0x4D5307E6,
+  Halo3ODST = 0x4D530877,
+  HaloReach = 0x4D53085B,
+  Halo4 = 0x4D530919
 };
 
 class HookableGame {
@@ -36,8 +45,7 @@ class HookableGame {
   virtual ~HookableGame() = default;
 
   virtual bool IsGameSupported() = 0;
-  virtual X_RESULT GetState(uint32_t user_index, RawInputState& input_state,
-                            X_INPUT_STATE* out_state) = 0;
+  virtual bool DoHooks(uint32_t user_index, RawInputState& input_state) = 0;
 };
 
 }  // namespace winkey

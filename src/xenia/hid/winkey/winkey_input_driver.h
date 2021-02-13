@@ -16,6 +16,23 @@
 #include "xenia/hid/input_driver.h"
 #include "xenia/hid/winkey/hookables/hookable_game.h"
 
+#define XINPUT_BUTTONS_MASK  0xFFFF
+#define XINPUT_BIND_LEFT_TRIGGER 0x10000
+#define XINPUT_BIND_RIGHT_TRIGGER 0x20000
+
+#define XINPUT_BIND_LS_UP    0x100000
+#define XINPUT_BIND_LS_DOWN  0x200000
+#define XINPUT_BIND_LS_LEFT  0x400000
+#define XINPUT_BIND_LS_RIGHT 0x800000
+
+#define XINPUT_BIND_RS_UP    0x1000000
+#define XINPUT_BIND_RS_DOWN  0x2000000
+#define XINPUT_BIND_RS_LEFT  0x4000000
+#define XINPUT_BIND_RS_RIGHT 0x8000000
+
+#define VK_BIND_MWHEELUP     0x10000
+#define VK_BIND_MWHEELDOWN   0x20000
+
 namespace xe {
 namespace hid {
 namespace winkey {
@@ -48,8 +65,6 @@ class WinKeyInputDriver : public InputDriver {
 
   std::mutex mouse_mutex_;
   std::queue<MouseEvent> mouse_events_;
-  bool mouse_left_click_ = false;
-  bool mouse_right_click_ = false;
 
   std::mutex key_mutex_;
   bool key_states_[256];
@@ -57,6 +72,9 @@ class WinKeyInputDriver : public InputDriver {
   uint32_t packet_number_;
 
   std::vector<std::unique_ptr<HookableGame>> hookable_games_;
+
+  std::unordered_map<uint32_t, std::unordered_map<uint32_t, uint32_t>>
+      key_binds_;
 };
 
 }  // namespace winkey
