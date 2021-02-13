@@ -19,7 +19,6 @@
 
 using namespace xe::kernel;
 
-DECLARE_bool(swap_buttons);
 DECLARE_double(sensitivity);
 DECLARE_bool(invert_y);
 
@@ -83,18 +82,17 @@ std::map<Halo3Game::GameBuild, GameBuildAddrs> supported_builds{
   }
 };
 
-const uint32_t kTitleIdHalo3 = 0x4D5307E6;
-const uint32_t kTitleIdHalo3ODST = 0x4D530877;
-const uint32_t kTitleIdHaloReach = 0x4D53085B;
-
 bool Halo3Game::IsGameSupported() {
   auto title_id = kernel_state()->title_id();
 
-  if (title_id != kTitleIdHalo3 &&
-      title_id != kTitleIdHalo3ODST &&
-      title_id != kTitleIdHaloReach) {
+  if (title_id != HookableGameIDs::Halo3 &&
+      title_id != HookableGameIDs::Halo3ODST &&
+      title_id != HookableGameIDs::HaloReach &&
+      title_id != HookableGameIDs::Halo4) {
     return false;
   }
+
+  bool supported = false;
 
   for (auto& build : supported_builds) {
     auto* build_ptr = kernel_memory()->TranslateVirtual<const char*>(
@@ -111,11 +109,9 @@ bool Halo3Game::IsGameSupported() {
 
 #define IS_KEY_DOWN(x) (input_state.key_states[x])
 
-X_RESULT Halo3Game::GetState(uint32_t user_index,
-                                 RawInputState& input_state,
-                                 X_INPUT_STATE* out_state) {
+bool Halo3Game::DoHooks(uint32_t user_index, RawInputState& input_state) {
   if (!IsGameSupported()) {
-    return 1;
+    return false;
   }
 
   if (supported_builds.count(game_build_)) {
@@ -164,145 +160,7 @@ X_RESULT Halo3Game::GetState(uint32_t user_index,
     }
   }
 
-  uint16_t buttons = 0;
-  uint8_t left_trigger = 0;
-  uint8_t right_trigger = 0;
-  int16_t thumb_lx = 0;
-  int16_t thumb_ly = 0;
-  int16_t thumb_rx = 0;
-  int16_t thumb_ry = 0;
-
-  if ((!cvars::swap_buttons && input_state.mouse_left_click) ||
-      (cvars::swap_buttons && input_state.mouse_right_click)) {
-    right_trigger = 0xFF;
-  }
-  if ((!cvars::swap_buttons && input_state.mouse_right_click) ||
-      (cvars::swap_buttons && input_state.mouse_left_click)) {
-    buttons |= 0x0080;  // XINPUT_GAMEPAD_RIGHT_THUMB
-  }
-
-  if (input_state.mouse.wheel_delta != 0) {
-    if (input_state.mouse.wheel_delta > 0) {
-      buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
-    } else {
-      buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
-    }
-  }
-
-  if (IS_KEY_DOWN(VK_SHIFT)) {
-    // Right stick toggled
-    if (IS_KEY_DOWN('W')) {
-      // Up
-      thumb_ry += SHRT_MAX;
-    }
-    if (IS_KEY_DOWN('S')) {
-      // Down
-      thumb_ry += SHRT_MIN;
-    }
-    if (IS_KEY_DOWN('D')) {
-      // Right
-      thumb_rx += SHRT_MAX;
-    }
-    if (IS_KEY_DOWN('A')) {
-      // Left
-      thumb_rx += SHRT_MIN;
-    }
-  } else {
-    // left stick
-    if (IS_KEY_DOWN('A')) {
-      // A
-      thumb_lx += SHRT_MIN;
-    }
-    if (IS_KEY_DOWN('D')) {
-      // D
-      thumb_lx += SHRT_MAX;
-    }
-    if (IS_KEY_DOWN('S')) {
-      // S
-      thumb_ly += SHRT_MIN;
-    }
-    if (IS_KEY_DOWN('W')) {
-      // W
-      thumb_ly += SHRT_MAX;
-    }
-  }
-
-  if (IS_KEY_DOWN(VK_CONTROL) || IS_KEY_DOWN('C')) {
-    // CTRL/C
-    buttons |= 0x0040;  // XINPUT_GAMEPAD_LEFT_THUMB
-  }
-
-  // DPad
-  if (IS_KEY_DOWN(VK_UP)) {
-    // Up
-    buttons |= 0x0001;  // XINPUT_GAMEPAD_DPAD_UP
-  }
-  if (IS_KEY_DOWN(VK_DOWN)) {
-    // Down
-    buttons |= 0x0002;  // XINPUT_GAMEPAD_DPAD_DOWN
-  }
-  if (IS_KEY_DOWN(VK_RIGHT)) {
-    // Right
-    buttons |= 0x0008;  // XINPUT_GAMEPAD_DPAD_RIGHT
-  }
-  if (IS_KEY_DOWN(VK_LEFT)) {
-    // Left
-    buttons |= 0x0004;  // XINPUT_GAMEPAD_DPAD_LEFT
-  }
-
-  if (IS_KEY_DOWN('F')) {
-    buttons |= 0x4000;  // XINPUT_GAMEPAD_X
-  }
-  if (IS_KEY_DOWN('Q') || IS_KEY_DOWN('B')) {
-    buttons |= 0x2000;  // XINPUT_GAMEPAD_B
-  }
-  if (IS_KEY_DOWN('E') || IS_KEY_DOWN(VK_SPACE)) {
-    buttons |= 0x1000;  // XINPUT_GAMEPAD_A
-  }
-  if (IS_KEY_DOWN('3')) {
-    buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
-  }
-  if (IS_KEY_DOWN('G')) {
-    left_trigger = 0xFF;
-  }
-
-  if (IS_KEY_DOWN('V')) {
-    buttons |= 0x0080;  // XINPUT_GAMEPAD_RIGHT_THUMB
-  }
-
-  /*if (IS_KEY_DOWN('Q') || IS_KEY_DOWN('I')) {
-    // Q / I
-    left_trigger = 0xFF;
-  }
-
-  if (IS_KEY_DOWN('E') || IS_KEY_DOWN('O')) {
-    // E / O
-    right_trigger = 0xFF;
-  }*/
-
-  if (IS_KEY_DOWN(VK_TAB)) {
-    buttons |= 0x0020;  // XINPUT_GAMEPAD_BACK
-  }
-  if (IS_KEY_DOWN(VK_RETURN)) {
-    buttons |= 0x0010;  // XINPUT_GAMEPAD_START
-  }
-  if (IS_KEY_DOWN('1')) {
-    buttons |= 0x0100;  // XINPUT_GAMEPAD_LEFT_SHOULDER
-  }
-  if (IS_KEY_DOWN('R')) {
-    buttons |= 0x0200;  // XINPUT_GAMEPAD_RIGHT_SHOULDER
-  }
-
-  // Apply our inputs
-  out_state->gamepad.buttons = buttons;
-  out_state->gamepad.left_trigger = left_trigger;
-  out_state->gamepad.right_trigger = right_trigger;
-  out_state->gamepad.thumb_lx = thumb_lx;
-  out_state->gamepad.thumb_ly = thumb_ly;
-  out_state->gamepad.thumb_rx = thumb_rx;
-  out_state->gamepad.thumb_ry = thumb_ry;
-
-  return X_ERROR_SUCCESS;
+  return true;
 }
 
 
