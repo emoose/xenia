@@ -29,17 +29,6 @@ struct RawInputState {
   bool* key_states;
 };
 
-// For per-game bindings
-// (if adding new game, make sure to update WinKeyInputDriver::WinKeyInputDriver!
-enum HookableGameIDs : uint32_t {
-  Unsupported = 0,
-  GoldenEye = 0x584108A9,
-  Halo3 = 0x4D5307E6,
-  Halo3ODST = 0x4D530877,
-  HaloReach = 0x4D53085B,
-  Halo4 = 0x4D530919
-};
-
 class HookableGame {
  public:
   virtual ~HookableGame() = default;
