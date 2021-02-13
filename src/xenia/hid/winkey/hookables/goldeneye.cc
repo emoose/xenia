@@ -26,6 +26,8 @@ DEFINE_double(
     "(GoldenEye) Distance crosshair can move in aim-mode before turning the camera",
     "MouseHook");
 
+const uint32_t kTitleIdGoldenEye = 0x584108A9;
+
 namespace xe {
 namespace hid {
 namespace winkey {
@@ -33,7 +35,7 @@ namespace winkey {
 GoldeneyeGame::~GoldeneyeGame() = default;
 
 bool GoldeneyeGame::IsGameSupported() {
-  if (kernel_state()->title_id() != HookableGameIDs::GoldenEye) {
+  if (kernel_state()->title_id() != kTitleIdGoldenEye) {
     return false;
   }
 

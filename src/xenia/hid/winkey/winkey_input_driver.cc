@@ -29,6 +29,8 @@ DEFINE_bool(disable_autoaim, true,
             "Disable autoaim in games that support it (only GE currently)",
             "MouseHook");
 
+const uint32_t kTitleIdDefaultBindings = 0;
+
 static const std::unordered_map<std::string, uint32_t> kXInputButtons = {
     {"up", 0x1},
     {"down", 0x2},
@@ -182,7 +184,7 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
   std::ifstream binds("bindings.ini");
   if (binds.is_open()) {
     std::string cur_section = "default";
-    uint32_t cur_game = HookableGameIDs::Unsupported;
+    uint32_t cur_game = kTitleIdDefaultBindings;
     std::unordered_map<uint32_t, uint32_t> cur_binds;
 
     std::string line;
@@ -197,23 +199,19 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
 
       if (line.length() >= 3 && line[0] == '[' &&
           line[line.length() - 1] == ']') {
+
         // New section
         if (cur_binds.size() > 0) {
           key_binds_.emplace(cur_game, cur_binds);
           cur_binds.clear();
         }
         cur_section = line.substr(1, line.length() - 2);
-        if (cur_section == "GoldenEye") {
-          cur_game = HookableGameIDs::GoldenEye;
-        } else if (cur_section == "Halo3") {
-          cur_game = HookableGameIDs::Halo3;
-        } else if (cur_section == "Halo3ODST") {
-          cur_game = HookableGameIDs::Halo3ODST;
-        } else if (cur_section == "HaloReach") {
-          cur_game = HookableGameIDs::HaloReach;
-        } else if (cur_section == "Halo4") {
-          cur_game = HookableGameIDs::Halo4;
+        auto sep = cur_section.find_first_of(' ');
+        if (sep >= 0) {
+          cur_section = cur_section.substr(0, sep);
         }
+        cur_game = std::stoul(cur_section, nullptr, 16);
+
         continue;
       }
 
@@ -408,12 +406,10 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
       std::unique_lock<std::mutex> key_lock(key_mutex_);
       state.key_states = key_states_;
 
-      uint32_t cur_game = HookableGameIDs::Unsupported;
       // Check if we have support for the currently loaded game
       for (auto& game : hookable_games_) {
         if (game->IsGameSupported()) {
           game->DoHooks(user_index, state);
-          cur_game = xe::kernel::kernel_state()->title_id();
         }
       }
 
@@ -437,9 +433,13 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
           thumb_ry = SHRT_MAX;
         }
       } else {
+        uint32_t cur_game = xe::kernel::kernel_state()->title_id();
+        if (!key_binds_.count(cur_game)) {
+          cur_game = kTitleIdDefaultBindings;
+        }
         if (key_binds_.count(cur_game)) {
           auto& binds = key_binds_.at(cur_game);
-          auto add_binding = [binds, &buttons, &left_trigger, &right_trigger,
+          auto process_binding = [binds, &buttons, &left_trigger, &right_trigger,
                               &thumb_lx, &thumb_ly, &thumb_rx,
                               &thumb_ry](uint32_t key) {
             if (!binds.count(key)) {
@@ -485,15 +485,15 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
 
           if (state.mouse.wheel_delta != 0) {
             if (state.mouse.wheel_delta > 0) {
-              add_binding(VK_BIND_MWHEELUP);
+              process_binding(VK_BIND_MWHEELUP);
             } else {
-              add_binding(VK_BIND_MWHEELDOWN);
+              process_binding(VK_BIND_MWHEELDOWN);
             }
           }
 
           for (int i = 0; i < 0x100; i++) {
             if (key_states_[i]) {
-              add_binding(i);
+              process_binding(i);
             }
           }
         }

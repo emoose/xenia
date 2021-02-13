@@ -22,6 +22,11 @@ using namespace xe::kernel;
 DECLARE_double(sensitivity);
 DECLARE_bool(invert_y);
 
+const uint32_t kTitleIdHalo3 = 0x4D5307E6;
+const uint32_t kTitleIdHalo3ODST = 0x4D530877;
+const uint32_t kTitleIdHaloReach = 0x4D53085B;
+const uint32_t kTitleIdHalo4 = 0x4D530919;
+
 namespace xe {
 namespace hid {
 namespace winkey {
@@ -85,10 +90,8 @@ std::map<Halo3Game::GameBuild, GameBuildAddrs> supported_builds{
 bool Halo3Game::IsGameSupported() {
   auto title_id = kernel_state()->title_id();
 
-  if (title_id != HookableGameIDs::Halo3 &&
-      title_id != HookableGameIDs::Halo3ODST &&
-      title_id != HookableGameIDs::HaloReach &&
-      title_id != HookableGameIDs::Halo4) {
+  if (title_id != kTitleIdHalo3 && title_id != kTitleIdHalo3ODST &&
+      title_id != kTitleIdHaloReach && title_id != kTitleIdHalo4) {
     return false;
   }
 
