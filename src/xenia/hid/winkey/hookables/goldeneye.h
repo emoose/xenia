@@ -11,6 +11,7 @@
 #define XENIA_HID_WINKEY_GOLDENEYE_H_
 
 #include "xenia/hid/winkey/hookables/hookable_game.h"
+#include "xenia/kernel/xclock.h"
 
 namespace xe {
 namespace hid {
@@ -28,6 +29,11 @@ class GoldeneyeGame : public HookableGame {
   uint32_t prev_aim_mode_ = 0;
   uint32_t prev_game_pause_flag_ = -1;
   uint32_t prev_game_control_active_ = -1;
+
+  float centering_speed_ = 0.0125f;
+  xe::kernel::XClock::time_point time_start_center_;
+  bool start_centering_ = false;
+  bool force_centering_ = false; // prevents sway being applied
 };
 
 }  // namespace winkey

@@ -29,7 +29,7 @@ DEFINE_double(aim_turn_distance, 0.4f,
 DEFINE_double(ge_menu_sensitivity, 0.5f,
               "(GoldenEye) Mouse sensitivity when in menus", "MouseHook");
 
-DEFINE_bool(ge_gun_sway, true, "(GoldenEye) Sway gun as camera is turned",
+DEFINE_bool(ge_gun_sway, true, "(GoldenEye) Enable gun sway as camera is turned",
             "MouseHook");
 
 const uint32_t kTitleIdGoldenEye = 0x584108A9;
@@ -61,6 +61,8 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
   if (!IsGameSupported()) {
     return false;
   }
+
+  auto time = xe::kernel::XClock::now();
 
   // Move menu selection crosshair
   // TODO: detect if we're actually in the menu first
@@ -226,34 +228,49 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
           camY -= (chY * aim_multiplier);
           *player_cam_y = camY;
         }
+
+        time_start_center_ = time + std::chrono::milliseconds(50);
+        start_centering_ = true;
+        force_centering_ = true;  // skip weapon sway until we've centered
+        centering_speed_ = 0.05f; // speed up centering from aim-mode
       } else {
         // Start centering gun if we aren't currently moving it
-        if (!input_state.mouse.x_delta && !input_state.mouse.y_delta) {
-          if (gX != 0 || gY != 0) {
-            if (gX > 0) {
-              gX -= std::min(0.05f, gX);
+        if ((!input_state.mouse.x_delta && !input_state.mouse.y_delta) ||
+            force_centering_) {
+          if (start_centering_ && time >= time_start_center_) {
+            if (gX != 0 || gY != 0) {
+              if (gX > 0) {
+                gX -= std::min(centering_speed_, gX);
+              }
+              if (gX < 0) {
+                gX += std::min(centering_speed_, -gX);
+              }
+              if (gY > 0) {
+                gY -= std::min(centering_speed_, gY);
+              }
+              if (gY < 0) {
+                gY += std::min(centering_speed_, -gY);
+              }
             }
-            if (gX < 0) {
-              gX += std::min(0.05f, -gX);
-            }
-            if (gY > 0) {
-              gY -= std::min(0.05f, gY);
-            }
-            if (gY < 0) {
-              gY += std::min(0.05f, -gY);
+            if (gX == 0 && gY == 0) {
+              start_centering_ = false;
+              centering_speed_ = 0.0125f;
+              force_centering_ = false;
             }
           }
-        } else {
-          float camX = (float)*player_cam_x;
-          float camY = (float)*player_cam_y;
+        }
+
+        if (input_state.mouse.x_delta || input_state.mouse.y_delta) {
+          float camX = *player_cam_x;
+          float camY = *player_cam_y;
 
           camX += (((float)input_state.mouse.x_delta) / 10.f) *
                   (float)cvars::sensitivity;
           
           // Add 'sway' to gun if we're moving
-          float gun_sway_x = (((float)input_state.mouse.x_delta) / 2000.f) *
+          float gun_sway_x = (((float)input_state.mouse.x_delta) / 4000.f) *
                              (float)cvars::sensitivity;
-          float gun_sway_y = (((float)input_state.mouse.y_delta) / 2000.f) *
+          float gun_sway_y = (((float)input_state.mouse.y_delta) / 4000.f) *
                              (float)cvars::sensitivity;
 
           float gun_sway_x_changed = gX + gun_sway_x;
@@ -271,24 +288,27 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
           *player_cam_x = camX;
           *player_cam_y = camY;
 
-          // Bound the 'sway' movement to [0.5:-0.5] to make it look a bit better
-          // (but only if the sway would make it go further OOB)
-          if (gun_sway_x_changed > 0.5f && gun_sway_x > 0) {
-            gun_sway_x_changed = gX;
-          }
-          if (gun_sway_x_changed < -0.5f && gun_sway_x < 0) {
-            gun_sway_x_changed = gX;
-          }
-          if (gun_sway_y_changed > 0.5f && gun_sway_y > 0) {
-            gun_sway_y_changed = gY;
-          }
-          if (gun_sway_y_changed < -0.5f && gun_sway_y < 0) {
-            gun_sway_y_changed = gY;
-          }
+          if (cvars::ge_gun_sway && !force_centering_) {
+            // Bound the 'sway' movement to [0.2:-0.2] to make it look a bit
+            // better (but only if the sway would make it go further OOB)
+            if (gun_sway_x_changed > 0.2f && gun_sway_x > 0) {
+              gun_sway_x_changed = gX;
+            }
+            if (gun_sway_x_changed < -0.2f && gun_sway_x < 0) {
+              gun_sway_x_changed = gX;
+            }
+            if (gun_sway_y_changed > 0.2f && gun_sway_y > 0) {
+              gun_sway_y_changed = gY;
+            }
+            if (gun_sway_y_changed < -0.2f && gun_sway_y < 0) {
+              gun_sway_y_changed = gY;
+            }
 
-          if (cvars::ge_gun_sway) {
             gX = gun_sway_x_changed;
             gY = gun_sway_y_changed;
+
+            time_start_center_ = time + std::chrono::milliseconds(50);
+            start_centering_ = true;
           }
         }
 
