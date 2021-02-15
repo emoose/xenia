@@ -110,7 +110,8 @@ bool Halo3Game::IsGameSupported() {
 
 #define IS_KEY_DOWN(x) (input_state.key_states[x])
 
-bool Halo3Game::DoHooks(uint32_t user_index, RawInputState& input_state) {
+bool Halo3Game::DoHooks(uint32_t user_index, RawInputState& input_state,
+                        X_INPUT_STATE* out_state) {
   if (!IsGameSupported()) {
     return false;
   }

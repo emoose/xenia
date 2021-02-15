@@ -21,13 +21,13 @@ class GoldeneyeGame : public HookableGame {
   ~GoldeneyeGame() override;
 
   bool IsGameSupported();
-  bool DoHooks(uint32_t user_index, RawInputState& input_state);
+  bool DoHooks(uint32_t user_index, RawInputState& input_state,
+               X_INPUT_STATE* out_state);
 
  private:
   uint32_t prev_aim_mode_ = 0;
   uint32_t prev_game_pause_flag_ = -1;
   uint32_t prev_game_control_active_ = -1;
-  bool player_exiting_aim_mode_ = false;
 };
 
 }  // namespace winkey

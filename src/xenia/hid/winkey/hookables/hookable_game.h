@@ -34,7 +34,8 @@ class HookableGame {
   virtual ~HookableGame() = default;
 
   virtual bool IsGameSupported() = 0;
-  virtual bool DoHooks(uint32_t user_index, RawInputState& input_state) = 0;
+  virtual bool DoHooks(uint32_t user_index, RawInputState& input_state,
+                       X_INPUT_STATE* out_state) = 0;
 };
 
 }  // namespace winkey
