@@ -21,10 +21,13 @@ DECLARE_double(sensitivity);
 DECLARE_bool(invert_y);
 DECLARE_bool(disable_autoaim);
 
-DEFINE_double(
-    aim_turn_distance, 0.4f,
-    "(GoldenEye) Distance crosshair can move in aim-mode before turning the camera",
-    "MouseHook");
+DEFINE_double(aim_turn_distance, 0.4f,
+              "(GoldenEye) Distance crosshair can move in aim-mode before "
+              "turning the camera",
+              "MouseHook");
+
+DEFINE_double(ge_menu_sensitivity, 0.5f,
+              "(GoldenEye) Mouse sensitivity when in menus", "MouseHook");
 
 const uint32_t kTitleIdGoldenEye = 0x584108A9;
 
@@ -65,10 +68,10 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state) {
     float menuX = *menuX_ptr;
     float menuY = *menuY_ptr;
 
-    menuX +=
-        (((float)input_state.mouse.x_delta) / 5.f) * (float)cvars::sensitivity;
-    menuY +=
-        (((float)input_state.mouse.y_delta) / 5.f) * (float)cvars::sensitivity;
+    menuX += (((float)input_state.mouse.x_delta) / 5.f) *
+             (float)cvars::ge_menu_sensitivity;
+    menuY += (((float)input_state.mouse.y_delta) / 5.f) *
+             (float)cvars::ge_menu_sensitivity;
 
     *menuX_ptr = menuX;
     *menuY_ptr = menuY;
@@ -207,32 +210,14 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state) {
         }
 
         // Keep the gun/crosshair in-bounds [1:-1]
-
-        if (chX > 1) {
-          chX = 1;
-        }
-        if (chX < -1) {
-          chX = -1;
-        }
-        if (chY > 1) {
-          chY = 1;
-        }
-        if (chY < -1) {
-          chY = -1;
-        }
-
-        if (gX > 1) {
-          gX = 1;
-        }
-        if (gX < -1) {
-          gX = -1;
-        }
-        if (gY > 1) {
-          gY = 1;
-        }
-        if (gY < -1) {
-          gY = -1;
-        }
+        chX = std::min(chX, 1.f);
+        chX = std::max(chX, -1.f);
+        chY = std::min(chY, 1.f);
+        chY = std::max(chY, -1.f);
+        gX = std::min(gX, 1.f);
+        gX = std::max(gX, -1.f);
+        gY = std::min(gY, 1.f);
+        gY = std::max(gY, -1.f);
 
         *player_crosshair_x = chX;
         *player_crosshair_y = chY;
@@ -243,7 +228,7 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state) {
         float camX = (float)*player_cam_x;
         float camY = (float)*player_cam_y;
 
-        // this multiplier lets us slow down the movement when zoomed in
+        // this multiplier lets us slow down the camera-turn when zoomed in
         // value from this addr works but doesn't seem correct, seems too slow
         // when zoomed, might be better to calculate it from FOV instead?
         // (current_fov seems to be at 0x115C)
