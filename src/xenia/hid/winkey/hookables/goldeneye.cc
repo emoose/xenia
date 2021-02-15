@@ -164,19 +164,19 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state) {
       // Smoothly bring gun back to center
       if (player_exiting_aim_mode_) {
         if (*player_gun_x > 0) {
-          float gX = *player_gun_x - std::min(0.05f, (float)*player_gun_x);
+          float gX = *player_gun_x - std::min(0.2f, (float)*player_gun_x);
           *player_gun_x = gX;
         }
         if (*player_gun_x < 0) {
-          float gX = *player_gun_x + std::min(0.05f, -((float)*player_gun_x));
+          float gX = *player_gun_x + std::min(0.2f, -((float)*player_gun_x));
           *player_gun_x = gX;
         }
         if (*player_gun_y > 0) {
-          float gX = *player_gun_y - std::min(0.05f, (float)*player_gun_y);
+          float gX = *player_gun_y - std::min(0.2f, (float)*player_gun_y);
           *player_gun_y = gX;
         }
         if (*player_gun_y < 0) {
-          float gX = *player_gun_y + std::min(0.05f, -((float)*player_gun_y));
+          float gX = *player_gun_y + std::min(0.2f, -((float)*player_gun_y));
           *player_gun_y = gX;
         }
         if (*player_gun_y == 0 && *player_gun_x == 0) {
