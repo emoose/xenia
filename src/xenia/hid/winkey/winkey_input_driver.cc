@@ -251,7 +251,7 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
       }
 
       // Not a section, must be bind
-      auto sep = line.find_first_of('=');
+      auto sep = line.find_last_of('=');
       if (sep < 0) {
         continue;  // invalid
       }
