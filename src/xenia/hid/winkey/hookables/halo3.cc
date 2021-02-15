@@ -95,8 +95,6 @@ bool Halo3Game::IsGameSupported() {
     return false;
   }
 
-  bool supported = false;
-
   for (auto& build : supported_builds) {
     auto* build_ptr = kernel_memory()->TranslateVirtual<const char*>(
         build.second.build_string_addr);
@@ -118,8 +116,8 @@ bool Halo3Game::DoHooks(uint32_t user_index, RawInputState& input_state) {
   }
 
   if (supported_builds.count(game_build_)) {
-    // Doesn't seem to be any way to get tls_static_address_ besides this
-    // (XThread::GetTLSValue only returns tls_dynamic_address_, and doesn't
+    // HACKHACK: Doesn't seem to be any way to get tls_static_address_ besides
+    // this (XThread::GetTLSValue only returns tls_dynamic_address_, and doesn't
     // seem to be any functions to get static_addr...)
 
     uint32_t pcr_addr =
