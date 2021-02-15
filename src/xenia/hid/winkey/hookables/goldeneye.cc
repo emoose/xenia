@@ -29,6 +29,9 @@ DEFINE_double(aim_turn_distance, 0.4f,
 DEFINE_double(ge_menu_sensitivity, 0.5f,
               "(GoldenEye) Mouse sensitivity when in menus", "MouseHook");
 
+DEFINE_bool(ge_gun_sway, true, "(GoldenEye) Sway gun as camera is turned",
+            "MouseHook");
+
 const uint32_t kTitleIdGoldenEye = 0x584108A9;
 
 namespace xe {
@@ -226,18 +229,18 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
       } else {
         // Start centering gun if we aren't currently moving it
         if (!input_state.mouse.x_delta && !input_state.mouse.y_delta) {
-          if (gY != 0 || gX != 0) {
-            if (*player_gun_x > 0) {
-              gX = gX - std::min(0.1f, gX);
+          if (gX != 0 || gY != 0) {
+            if (gX > 0) {
+              gX -= std::min(0.05f, gX);
             }
-            if (*player_gun_x < 0) {
-              gX = gX + std::min(0.1f, -gX);
+            if (gX < 0) {
+              gX += std::min(0.05f, -gX);
             }
-            if (*player_gun_y > 0) {
-              gY = gY - std::min(0.1f, gY);
+            if (gY > 0) {
+              gY -= std::min(0.05f, gY);
             }
-            if (*player_gun_y < 0) {
-              gY = gY + std::min(0.1f, -gY);
+            if (gY < 0) {
+              gY += std::min(0.05f, -gY);
             }
           }
         } else {
@@ -283,8 +286,10 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
             gun_sway_y_changed = gY;
           }
 
-          gX = gun_sway_x_changed;
-          gY = gun_sway_y_changed;
+          if (cvars::ge_gun_sway) {
+            gX = gun_sway_x_changed;
+            gY = gun_sway_y_changed;
+          }
         }
 
         if (out_state->gamepad.right_trigger != 0) {
