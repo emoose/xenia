@@ -67,15 +67,21 @@ static const std::unordered_map<std::string, uint32_t> kXInputButtons = {
 
 static const std::unordered_map<std::string, uint32_t> kKeyMap = {
     {"lclick", VK_LBUTTON},
-    {"rclick", VK_RBUTTON},
-    {"mclick", VK_MBUTTON},
     {"lmouse", VK_LBUTTON},
+    {"mouse1", VK_LBUTTON},
+    {"rclick", VK_RBUTTON},
     {"rmouse", VK_RBUTTON},
+    {"mouse2", VK_RBUTTON},
+    {"mclick", VK_MBUTTON},
     {"mmouse", VK_MBUTTON},
+    {"mouse3", VK_MBUTTON},
+    {"mouse4", VK_XBUTTON1},
+    {"mouse5", VK_XBUTTON2},
     {"mwheelup", VK_BIND_MWHEELUP},
     {"mwheeldown", VK_BIND_MWHEELDOWN},
     {"control", VK_CONTROL},
     {"ctrl", VK_CONTROL},
+    {"alt", VK_MENU},
     {"backspace", VK_BACK},
     {"down", VK_DOWN},
     {"left", VK_LEFT},
@@ -125,7 +131,31 @@ static const std::unordered_map<std::string, uint32_t> kKeyMap = {
     {"num-", VK_SUBTRACT},
     {"num*", VK_MULTIPLY},
     {"num/", VK_DIVIDE},
-    {"num.", VK_DECIMAL}};
+    {"num.", VK_DECIMAL},
+    {";", VK_OEM_1},
+    {":", VK_OEM_1},
+    {"=", VK_OEM_PLUS},
+    {"+", VK_OEM_PLUS},
+    {",", VK_OEM_COMMA},
+    {"<", VK_OEM_COMMA},
+    {"-", VK_OEM_MINUS},
+    {"_", VK_OEM_MINUS},
+    {".", VK_OEM_PERIOD},
+    {">", VK_OEM_PERIOD},
+    {"/", VK_OEM_2},
+    {"?", VK_OEM_2},
+    {"'", VK_OEM_3},  // uk keyboard
+    {"@", VK_OEM_3},  // uk keyboard
+    {"[", VK_OEM_4},
+    {"{", VK_OEM_4},
+    {"\\", VK_OEM_5},
+    {"|", VK_OEM_5},
+    {"]", VK_OEM_6},
+    {"}", VK_OEM_6},
+    {"#", VK_OEM_7},  // uk keyboard
+    {"\"", VK_OEM_7},
+    {"`", VK_OEM_8},  // uk keyboard, no idea what this is on US..
+};
 
 const std::string WHITESPACE = " \n\r\t\f\v";
 
@@ -275,29 +305,35 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
 
     {
       std::unique_lock<std::mutex> key_lock(key_mutex_);
-      if ((mouse.buttons & RI_MOUSE_LEFT_BUTTON_DOWN) ==
-          RI_MOUSE_LEFT_BUTTON_DOWN) {
+      if (mouse.buttons & RI_MOUSE_LEFT_BUTTON_DOWN) {
         key_states_[VK_LBUTTON] = true;
       }
-      if ((mouse.buttons & RI_MOUSE_LEFT_BUTTON_UP) ==
-          RI_MOUSE_LEFT_BUTTON_UP) {
+      if (mouse.buttons & RI_MOUSE_LEFT_BUTTON_UP) {
         key_states_[VK_LBUTTON] = false;
       }
-      if ((mouse.buttons & RI_MOUSE_RIGHT_BUTTON_DOWN) ==
-          RI_MOUSE_RIGHT_BUTTON_DOWN) {
+      if (mouse.buttons & RI_MOUSE_RIGHT_BUTTON_DOWN) {
         key_states_[VK_RBUTTON] = true;
       }
-      if ((mouse.buttons & RI_MOUSE_RIGHT_BUTTON_UP) ==
-          RI_MOUSE_RIGHT_BUTTON_UP) {
+      if (mouse.buttons & RI_MOUSE_RIGHT_BUTTON_UP) {
         key_states_[VK_RBUTTON] = false;
       }
-      if ((mouse.buttons & RI_MOUSE_MIDDLE_BUTTON_DOWN) ==
-          RI_MOUSE_MIDDLE_BUTTON_DOWN) {
+      if (mouse.buttons & RI_MOUSE_MIDDLE_BUTTON_DOWN) {
         key_states_[VK_MBUTTON] = true;
       }
-      if ((mouse.buttons & RI_MOUSE_MIDDLE_BUTTON_UP) ==
-          RI_MOUSE_MIDDLE_BUTTON_UP) {
+      if (mouse.buttons & RI_MOUSE_MIDDLE_BUTTON_UP) {
         key_states_[VK_MBUTTON] = false;
+      }
+      if (mouse.buttons & RI_MOUSE_BUTTON_4_DOWN) {
+        key_states_[VK_XBUTTON1] = true;
+      }
+      if (mouse.buttons & RI_MOUSE_BUTTON_4_UP) {
+        key_states_[VK_XBUTTON1] = false;
+      }
+      if (mouse.buttons & RI_MOUSE_BUTTON_5_DOWN) {
+        key_states_[VK_XBUTTON2] = true;
+      }
+      if (mouse.buttons & RI_MOUSE_BUTTON_5_UP) {
+        key_states_[VK_XBUTTON2] = false;
       }
     }
   });
