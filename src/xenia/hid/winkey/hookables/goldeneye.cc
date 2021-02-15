@@ -53,7 +53,8 @@ bool GoldeneyeGame::IsGameSupported() {
 
 #define IS_KEY_DOWN(x) (input_state.key_states[x])
 
-bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state) {
+bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
+                            X_INPUT_STATE* out_state) {
   if (!IsGameSupported()) {
     return false;
   }
@@ -149,10 +150,6 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state) {
           // Entering aim mode, reset gun position
           *player_gun_x = 0;
           *player_gun_y = 0;
-          player_exiting_aim_mode_ = false;
-        } else {
-          // Exiting aim mode
-          player_exiting_aim_mode_ = true;
         }
         // Always reset crosshair after entering/exiting aim mode
         // Otherwise non-aim-mode will still fire toward it...
@@ -161,28 +158,6 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state) {
         prev_aim_mode_ = player_aim_mode;
       }
 
-      // Smoothly bring gun back to center
-      if (player_exiting_aim_mode_) {
-        if (*player_gun_x > 0) {
-          float gX = *player_gun_x - std::min(0.2f, (float)*player_gun_x);
-          *player_gun_x = gX;
-        }
-        if (*player_gun_x < 0) {
-          float gX = *player_gun_x + std::min(0.2f, -((float)*player_gun_x));
-          *player_gun_x = gX;
-        }
-        if (*player_gun_y > 0) {
-          float gX = *player_gun_y - std::min(0.2f, (float)*player_gun_y);
-          *player_gun_y = gX;
-        }
-        if (*player_gun_y < 0) {
-          float gX = *player_gun_y + std::min(0.2f, -((float)*player_gun_y));
-          *player_gun_y = gX;
-        }
-        if (*player_gun_y == 0 && *player_gun_x == 0) {
-          player_exiting_aim_mode_ = false;
-        }
-      }
       float gX = *player_gun_x;
       float gY = *player_gun_y;
 
@@ -249,22 +224,81 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state) {
           *player_cam_y = camY;
         }
       } else {
-        float camX = (float)*player_cam_x;
-        float camY = (float)*player_cam_y;
-
-        camX += (((float)input_state.mouse.x_delta) / 10.f) *
-                (float)cvars::sensitivity;
-
-        if (!cvars::invert_y) {
-          camY -= (((float)input_state.mouse.y_delta) / 10.f) *
-                  (float)cvars::sensitivity;
+        // Start centering gun if we aren't currently moving it
+        if (!input_state.mouse.x_delta && !input_state.mouse.y_delta) {
+          if (gY != 0 || gX != 0) {
+            if (*player_gun_x > 0) {
+              gX = gX - std::min(0.1f, gX);
+            }
+            if (*player_gun_x < 0) {
+              gX = gX + std::min(0.1f, -gX);
+            }
+            if (*player_gun_y > 0) {
+              gY = gY - std::min(0.1f, gY);
+            }
+            if (*player_gun_y < 0) {
+              gY = gY + std::min(0.1f, -gY);
+            }
+          }
         } else {
-          camY += (((float)input_state.mouse.y_delta) / 10.f) *
+          float camX = (float)*player_cam_x;
+          float camY = (float)*player_cam_y;
+
+          camX += (((float)input_state.mouse.x_delta) / 10.f) *
                   (float)cvars::sensitivity;
+          
+          // Add 'sway' to gun if we're moving
+          float gun_sway_x = (((float)input_state.mouse.x_delta) / 2000.f) *
+                             (float)cvars::sensitivity;
+          float gun_sway_y = (((float)input_state.mouse.y_delta) / 2000.f) *
+                             (float)cvars::sensitivity;
+
+          float gun_sway_x_changed = gX + gun_sway_x;
+          float gun_sway_y_changed = gY + gun_sway_y;
+
+          if (!cvars::invert_y) {
+            camY -= (((float)input_state.mouse.y_delta) / 10.f) *
+                    (float)cvars::sensitivity;
+          } else {
+            camY += (((float)input_state.mouse.y_delta) / 10.f) *
+                    (float)cvars::sensitivity;
+            gun_sway_y_changed = gY - gun_sway_y;
+          }
+
+          *player_cam_x = camX;
+          *player_cam_y = camY;
+
+          // Bound the 'sway' movement to [0.5:-0.5] to make it look a bit better
+          // (but only if the sway would make it go further OOB)
+          if (gun_sway_x_changed > 0.5f && gun_sway_x > 0) {
+            gun_sway_x_changed = gX;
+          }
+          if (gun_sway_x_changed < -0.5f && gun_sway_x < 0) {
+            gun_sway_x_changed = gX;
+          }
+          if (gun_sway_y_changed > 0.5f && gun_sway_y > 0) {
+            gun_sway_y_changed = gY;
+          }
+          if (gun_sway_y_changed < -0.5f && gun_sway_y < 0) {
+            gun_sway_y_changed = gY;
+          }
+
+          gX = gun_sway_x_changed;
+          gY = gun_sway_y_changed;
         }
 
-        *player_cam_x = camX;
-        *player_cam_y = camY;
+        if (out_state->gamepad.right_trigger != 0) {
+          // firing, force gun to center
+          gX = gY = 0;
+        }
+
+        gX = std::min(gX, 1.f);
+        gX = std::max(gX, -1.f);
+        gY = std::min(gY, 1.f);
+        gY = std::max(gY, -1.f);
+
+        *player_gun_x = gX;
+        *player_gun_y = gY;
       }
     }
   }

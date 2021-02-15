@@ -423,8 +423,9 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
 
   X_RESULT result = X_ERROR_SUCCESS;
 
+  RawInputState state;
+
   if (window()->has_focus() && is_active()) {
-    RawInputState state;
 
     {
       std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
@@ -446,13 +447,6 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
     {
       std::unique_lock<std::mutex> key_lock(key_mutex_);
       state.key_states = key_states_;
-
-      // Check if we have support for the currently loaded game
-      for (auto& game : hookable_games_) {
-        if (game->IsGameSupported()) {
-          game->DoHooks(user_index, state);
-        }
-      }
 
       // Handle key bindings
       if (IS_KEY_DOWN(VK_SHIFT)) {
@@ -550,6 +544,15 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
   out_state->gamepad.thumb_ly = thumb_ly;
   out_state->gamepad.thumb_rx = thumb_rx;
   out_state->gamepad.thumb_ry = thumb_ry;
+
+  // Check if we have any hooks/injections for the current game
+  for (auto& game : hookable_games_) {
+    if (game->IsGameSupported()) {
+      std::unique_lock<std::mutex> key_lock(key_mutex_);
+      game->DoHooks(user_index, state, out_state);
+      break;
+    }
+  }
 
   return result;
 }
