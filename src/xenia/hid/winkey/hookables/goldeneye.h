@@ -33,7 +33,7 @@ class GoldeneyeGame : public HookableGame {
   float centering_speed_ = 0.0125f;
   xe::kernel::XClock::time_point time_start_center_;
   bool start_centering_ = false;
-  bool force_centering_ = false; // prevents sway being applied
+  bool disable_sway_ = false;  // temporarily prevents sway being applied
 };
 
 }  // namespace winkey

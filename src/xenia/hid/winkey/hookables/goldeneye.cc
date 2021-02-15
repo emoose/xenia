@@ -231,32 +231,29 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
 
         time_start_center_ = time + std::chrono::milliseconds(50);
         start_centering_ = true;
-        force_centering_ = true;  // skip weapon sway until we've centered
+        disable_sway_ = true;     // skip weapon sway until we've centered
         centering_speed_ = 0.05f; // speed up centering from aim-mode
       } else {
         // Start centering gun if we aren't currently moving it
-        if ((!input_state.mouse.x_delta && !input_state.mouse.y_delta) ||
-            force_centering_) {
-          if (start_centering_ && time >= time_start_center_) {
-            if (gX != 0 || gY != 0) {
-              if (gX > 0) {
-                gX -= std::min(centering_speed_, gX);
-              }
-              if (gX < 0) {
-                gX += std::min(centering_speed_, -gX);
-              }
-              if (gY > 0) {
-                gY -= std::min(centering_speed_, gY);
-              }
-              if (gY < 0) {
-                gY += std::min(centering_speed_, -gY);
-              }
+        if (start_centering_ && time >= time_start_center_) {
+          if (gX != 0 || gY != 0) {
+            if (gX > 0) {
+              gX -= std::min(centering_speed_, gX);
             }
-            if (gX == 0 && gY == 0) {
-              start_centering_ = false;
-              centering_speed_ = 0.0125f;
-              force_centering_ = false;
+            if (gX < 0) {
+              gX += std::min(centering_speed_, -gX);
             }
+            if (gY > 0) {
+              gY -= std::min(centering_speed_, gY);
+            }
+            if (gY < 0) {
+              gY += std::min(centering_speed_, -gY);
+            }
+          }
+          if (gX == 0 && gY == 0) {
+            centering_speed_ = 0.0125f;
+            start_centering_ = false;
+            disable_sway_ = false;
           }
         }
 
@@ -288,7 +285,7 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
           *player_cam_x = camX;
           *player_cam_y = camY;
 
-          if (cvars::ge_gun_sway && !force_centering_) {
+          if (cvars::ge_gun_sway && !disable_sway_) {
             // Bound the 'sway' movement to [0.2:-0.2] to make it look a bit
             // better (but only if the sway would make it go further OOB)
             if (gun_sway_x_changed > 0.2f && gun_sway_x > 0) {
@@ -306,9 +303,12 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
 
             gX = gun_sway_x_changed;
             gY = gun_sway_y_changed;
-
-            time_start_center_ = time + std::chrono::milliseconds(50);
+          }
+        } else {
+          if (!start_centering_) {
+            time_start_center_ = time + std::chrono::milliseconds(100);
             start_centering_ = true;
+            centering_speed_ = 0.0125f;
           }
         }
 
