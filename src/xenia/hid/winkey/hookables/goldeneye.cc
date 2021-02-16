@@ -77,10 +77,27 @@ std::map<GoldeneyeGame::GameBuild, RareGameBuildAddrs> supported_builds = {
           0x908, 0, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C, 0x11AC}
     },
     {
-      GoldeneyeGame::GameBuild::PerfectDark_Release_102,
+      GoldeneyeGame::GameBuild::PerfectDark_Release_52,
+        {0x825EC0E5, 0x30303532, 0, 0, 0, 0x8264909C, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
+          0, 0, 0}
+    },
+    {
+      GoldeneyeGame::GameBuild::PerfectDark_Devkit_102,
         {0x825EC0E5, 0x30313032, 0, 0, 0, 0x82649274, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
           0, 0, 0}
     },
+    // TODO: test these!
+    /*
+    {
+      GoldeneyeGame::GameBuild::PerfectDark_Release_104,
+        {0x825EC0D5, 0x30313034, 0, 0, 0, 0x82649264, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
+          0, 0, 0}
+    },
+    {
+      GoldeneyeGame::GameBuild::PerfectDark_Release_107,
+        {0x825FC25D, 0x30313037, 0, 0, 0, 0x826619E4, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
+          0, 0, 0}
+    },*/
 };
 
 bool GoldeneyeGame::IsGameSupported() {
