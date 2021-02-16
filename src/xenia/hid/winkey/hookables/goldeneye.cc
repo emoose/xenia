@@ -38,6 +38,7 @@ DEFINE_bool(ge_always_allow_inputs, false,
             "removed once I find a way to check for fade-in instead.", "MouseHook");
 
 const uint32_t kTitleIdGoldenEye = 0x584108A9;
+const uint32_t kTitleIdPerfectDark = 0x584109C2;
 
 namespace xe {
 namespace hid {
@@ -45,18 +46,60 @@ namespace winkey {
 
 GoldeneyeGame::~GoldeneyeGame() = default;
 
+struct RareGameBuildAddrs {
+  uint32_t check_addr;   // addr to check
+  uint32_t check_value;  // value to look for, if matches this value we know
+                         // it's this game
+
+  uint32_t menu_addr;  // addr of menu x/y
+  uint32_t game_pause_addr;
+
+  uint32_t settings_addr;
+
+  uint32_t player_addr;  // addr to pointer of player data
+
+  uint32_t player_offset_active;  // offset to "is control active/enabled" flag
+  uint32_t player_offset_cam_x;   // offset to camera X pos
+  uint32_t player_offset_cam_y;   // offset to camera Y pos
+  uint32_t player_offset_crosshair_x;
+  uint32_t player_offset_crosshair_y;
+  uint32_t player_offset_gun_x;
+  uint32_t player_offset_gun_y;
+  uint32_t player_offset_aim_mode;
+  uint32_t player_offset_aim_multiplier;
+};
+
+std::map<GoldeneyeGame::GameBuild, RareGameBuildAddrs> supported_builds = {
+    {
+      GoldeneyeGame::GameBuild::GoldenEye_Aug2007,
+        {0x8200336C, 0x676f6c64, 0x8272B37C, 0x82F1E70C, 0x83088228, 0x82F1FA98,
+          0x908, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C, 0x11AC}
+    },
+    {
+      GoldeneyeGame::GameBuild::PerfectDark_Release_102,
+        {0x825EC0E5, 0x30313032, 0, 0, 0, 0x82649274, 0x0, 0x14C, 0x15C, 0, 0, 0,
+          0, 0, 0}
+    },
+};
+
 bool GoldeneyeGame::IsGameSupported() {
-  if (kernel_state()->title_id() != kTitleIdGoldenEye) {
+  auto title_id = kernel_state()->title_id();
+
+  if (title_id != kTitleIdGoldenEye && title_id != kTitleIdPerfectDark) {
     return false;
   }
 
-  auto* check =
-      kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(0x8200336C);
-  if (!check) {
-    return false;
+  for (auto& build : supported_builds) {
+    auto* build_ptr = kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(
+        build.second.check_addr);
+
+    if (*build_ptr == build.second.check_value) {
+      game_build_ = build.first;
+      return true;
+    }
   }
 
-  return *check == 0x676f6c64;
+  return false;
 }
 
 #define IS_KEY_DOWN(x) (input_state.key_states[x])
@@ -67,30 +110,34 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
     return false;
   }
 
+  auto& game_addrs = supported_builds[game_build_];
+
   auto time = xe::kernel::XClock::now();
 
   // Move menu selection crosshair
   // TODO: detect if we're actually in the menu first
-  auto menuX_ptr =
-      kernel_memory()->TranslateVirtual<xe::be<float>*>(0x8272B37C);
-  auto menuY_ptr =
-      kernel_memory()->TranslateVirtual<xe::be<float>*>(0x8272B380);
-  if (menuX_ptr && menuY_ptr) {
-    float menuX = *menuX_ptr;
-    float menuY = *menuY_ptr;
+  if (game_addrs.menu_addr) {
+    auto menuX_ptr =
+        kernel_memory()->TranslateVirtual<xe::be<float>*>(game_addrs.menu_addr);
+    auto menuY_ptr =
+        kernel_memory()->TranslateVirtual<xe::be<float>*>(game_addrs.menu_addr + 4);
+    if (menuX_ptr && menuY_ptr) {
+      float menuX = *menuX_ptr;
+      float menuY = *menuY_ptr;
 
-    menuX += (((float)input_state.mouse.x_delta) / 5.f) *
-             (float)cvars::ge_menu_sensitivity;
-    menuY += (((float)input_state.mouse.y_delta) / 5.f) *
-             (float)cvars::ge_menu_sensitivity;
+      menuX += (((float)input_state.mouse.x_delta) / 5.f) *
+               (float)cvars::ge_menu_sensitivity;
+      menuY += (((float)input_state.mouse.y_delta) / 5.f) *
+               (float)cvars::ge_menu_sensitivity;
 
-    *menuX_ptr = menuX;
-    *menuY_ptr = menuY;
+      *menuX_ptr = menuX;
+      *menuY_ptr = menuY;
+    }
   }
 
   // Read addr of player base
   auto players_addr =
-      *kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(0x82F1FA98);
+      *kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(game_addrs.player_addr);
 
   if (!players_addr) {
     return true;
@@ -98,14 +145,21 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
 
   auto* player = kernel_memory()->TranslateVirtual(players_addr);
 
-  auto game_pause_flag =
-      *kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(0x82F1E70C);
+  uint32_t game_pause_flag = 0;
+  if (game_addrs.game_pause_addr) {
+    game_pause_flag = *kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(
+        game_addrs.game_pause_addr);
+  }
 
   // TODO: find better game_control_active byte, this doesn't handle the delay
   // when watch is brought up/down
   // also apparently doesn't get set until fade-in is complete (while controller
   // is active during the fade instead)
-  auto game_control_active = *(xe::be<uint32_t>*)(player + 0x908);
+  uint32_t game_control_active = 1;
+  if (game_addrs.player_offset_active) {
+    game_control_active =
+        *(xe::be<uint32_t>*)(player + game_addrs.player_offset_active);
+  }
   
   // TODO: remove this once we can detect fade-in instead
   if (cvars::ge_always_allow_inputs) {
@@ -117,36 +171,40 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
   if (game_pause_flag != prev_game_pause_flag_ ||
       game_control_active != prev_game_control_active_) {
 
-    auto settings_addr =
-        *kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(0x83088228);
+    if (game_addrs.settings_addr) {
+      auto settings_addr =
+          *kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(
+              game_addrs.settings_addr);
 
-    if (settings_addr) {
-      auto* settings_ptr = kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(
-          settings_addr + 0x298);
-      uint32_t settings = *settings_ptr;
+      if (settings_addr) {
+        auto* settings_ptr =
+            kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(settings_addr +
+                                                                 0x298);
+        uint32_t settings = *settings_ptr;
 
-      enum GESettingFlag {
-        LookUpright = 0x8,  // non-inverted
-        AutoAim = 0x10,
-        AimControlToggle = 0x20,
-        ShowAimCrosshair = 0x40,
-        LookAhead = 0x80,
-        ShowAmmoCounter = 0x100,
-        ShowAimBorder = 0x200,
-        ScreenLetterboxWide = 0x400,
-        ScreenLetterboxCinema = 0x800,
-        ScreenRatio16_9 = 0x1000,
-        ScreenRatio16_10 = 0x2000,
-        CameraRoll = 0x40000
-      };
+        enum GESettingFlag {
+          LookUpright = 0x8,  // non-inverted
+          AutoAim = 0x10,
+          AimControlToggle = 0x20,
+          ShowAimCrosshair = 0x40,
+          LookAhead = 0x80,
+          ShowAmmoCounter = 0x100,
+          ShowAimBorder = 0x200,
+          ScreenLetterboxWide = 0x400,
+          ScreenLetterboxCinema = 0x800,
+          ScreenRatio16_9 = 0x1000,
+          ScreenRatio16_10 = 0x2000,
+          CameraRoll = 0x40000
+        };
 
-      // Disable AutoAim & LookAhead
-      settings = settings & ~((uint32_t)GESettingFlag::LookAhead);
-      if (cvars::disable_autoaim) {
-        settings = settings & ~((uint32_t)GESettingFlag::AutoAim);
+        // Disable AutoAim & LookAhead
+        settings = settings & ~((uint32_t)GESettingFlag::LookAhead);
+        if (cvars::disable_autoaim) {
+          settings = settings & ~((uint32_t)GESettingFlag::AutoAim);
+        }
+
+        *settings_ptr = settings;
       }
-
-      *settings_ptr = settings;
 
       prev_game_pause_flag_ = game_pause_flag;
       prev_game_control_active_ = game_control_active;
@@ -158,31 +216,49 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
   }
 
   // GE007 mousehook hax
-  xe::be<float>* player_cam_x = (xe::be<float>*)(player + 0x254);
-  xe::be<float>* player_cam_y = (xe::be<float>*)(player + 0x264);
+  xe::be<float>* player_cam_x = (xe::be<float>*)(player + game_addrs.player_offset_cam_x);
+  xe::be<float>* player_cam_y =
+      (xe::be<float>*)(player + game_addrs.player_offset_cam_y);
 
-  xe::be<float>* player_crosshair_x = (xe::be<float>*)(player + 0x10A8);
-  xe::be<float>* player_crosshair_y = (xe::be<float>*)(player + 0x10AC);
-  xe::be<float>* player_gun_x = (xe::be<float>*)(player + 0x10BC);
-  xe::be<float>* player_gun_y = (xe::be<float>*)(player + 0x10C0);
+  xe::be<float>* player_crosshair_x =
+      (xe::be<float>*)(player + game_addrs.player_offset_crosshair_x);
+  xe::be<float>* player_crosshair_y =
+      (xe::be<float>*)(player + game_addrs.player_offset_crosshair_y);
+  xe::be<float>* player_gun_x =
+      (xe::be<float>*)(player + game_addrs.player_offset_gun_x);
+  xe::be<float>* player_gun_y =
+      (xe::be<float>*)(player + game_addrs.player_offset_gun_y);
 
-  uint32_t player_aim_mode = *(xe::be<uint32_t>*)(player + 0x22C);
+  uint32_t player_aim_mode = 0;
 
-  if (player_aim_mode != prev_aim_mode_) {
-    if (player_aim_mode != 0) {
-      // Entering aim mode, reset gun position
-      *player_gun_x = 0;
-      *player_gun_y = 0;
+  if (game_addrs.player_offset_aim_mode) {
+    player_aim_mode =
+        *(xe::be<uint32_t>*)(player + game_addrs.player_offset_aim_mode);
+
+    if (player_aim_mode != prev_aim_mode_) {
+      if (player_aim_mode != 0) {
+        // Entering aim mode, reset gun position
+        if (game_addrs.player_offset_gun_x) {
+          *player_gun_x = 0;
+        }
+        if (game_addrs.player_offset_gun_y) {
+          *player_gun_y = 0;
+        }
+      }
+      // Always reset crosshair after entering/exiting aim mode
+      // Otherwise non-aim-mode will still fire toward it...
+      if (game_addrs.player_offset_crosshair_x) {
+        *player_crosshair_x = 0;
+      }
+      if (game_addrs.player_offset_crosshair_y) {
+        *player_crosshair_y = 0;
+      }
+      prev_aim_mode_ = player_aim_mode;
     }
-    // Always reset crosshair after entering/exiting aim mode
-    // Otherwise non-aim-mode will still fire toward it...
-    *player_crosshair_x = 0;
-    *player_crosshair_y = 0;
-    prev_aim_mode_ = player_aim_mode;
   }
 
-  float gX = *player_gun_x;
-  float gY = *player_gun_y;
+  float gX = game_addrs.player_offset_gun_x ? *player_gun_x : 0.f;
+  float gY = game_addrs.player_offset_gun_y ? *player_gun_y : 0.f;
 
   // Have to do weird things converting it to normal float otherwise
   // xe::be += treats things as int?
@@ -230,8 +306,11 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
     // value from this addr works but doesn't seem correct, seems too slow
     // when zoomed, might be better to calculate it from FOV instead?
     // (current_fov seems to be at 0x115C)
-    float aim_multiplier =
-        *reinterpret_cast<xe::be<float>*>(player + 0x11AC);
+    float aim_multiplier = 1;
+    if (game_addrs.player_offset_aim_multiplier) {
+      aim_multiplier = *reinterpret_cast<xe::be<float>*>(
+          player + game_addrs.player_offset_aim_multiplier);
+    }
 
     // TODO: This almost matches up with "show aim border" perfectly
     // Except 0.4f will make Y move a little earlier than it should
@@ -341,8 +420,12 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
     gY = std::min(gY, 1.f);
     gY = std::max(gY, -1.f);
 
-    *player_gun_x = gX;
-    *player_gun_y = gY;
+    if (game_addrs.player_offset_gun_x) {
+      *player_gun_x = gX;
+    }
+    if (game_addrs.player_offset_gun_y) {
+      *player_gun_y = gY;
+    }
   }
 
   return true;

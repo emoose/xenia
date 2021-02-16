@@ -19,6 +19,12 @@ namespace winkey {
 
 class GoldeneyeGame : public HookableGame {
  public:
+  enum class GameBuild {
+    Unknown = 0,
+    GoldenEye_Aug2007 = 0x584108A9,
+    PerfectDark_Release_102 = 0x584109C2,
+  };
+
   ~GoldeneyeGame() override;
 
   bool IsGameSupported();
@@ -26,6 +32,8 @@ class GoldeneyeGame : public HookableGame {
                X_INPUT_STATE* out_state);
 
  private:
+  GameBuild game_build_ = GameBuild::Unknown;
+
   uint32_t prev_aim_mode_ = 0;
   uint32_t prev_game_pause_flag_ = -1;
   uint32_t prev_game_control_active_ = -1;
