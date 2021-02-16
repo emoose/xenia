@@ -59,6 +59,7 @@ struct RareGameBuildAddrs {
   uint32_t player_addr;  // addr to pointer of player data
 
   uint32_t player_offset_active;  // offset to "is control active/enabled" flag
+  uint32_t player_offset_active_uint8;  // offset to uint8 "is control active/enabled" flag
   uint32_t player_offset_cam_x;   // offset to camera X pos
   uint32_t player_offset_cam_y;   // offset to camera Y pos
   uint32_t player_offset_crosshair_x;
@@ -73,11 +74,11 @@ std::map<GoldeneyeGame::GameBuild, RareGameBuildAddrs> supported_builds = {
     {
       GoldeneyeGame::GameBuild::GoldenEye_Aug2007,
         {0x8200336C, 0x676f6c64, 0x8272B37C, 0x82F1E70C, 0x83088228, 0x82F1FA98,
-          0x908, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C, 0x11AC}
+          0x908, 0, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C, 0x11AC}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_102,
-        {0x825EC0E5, 0x30313032, 0, 0, 0, 0x82649274, 0x0, 0x14C, 0x15C, 0, 0, 0,
+        {0x825EC0E5, 0x30313032, 0, 0, 0, 0x82649274, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
           0, 0, 0}
     },
 };
@@ -160,6 +161,10 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
     game_control_active =
         *(xe::be<uint32_t>*)(player + game_addrs.player_offset_active);
   }
+  if (game_addrs.player_offset_active_uint8) {
+    game_control_active =
+        *(uint8_t*)(player + game_addrs.player_offset_active_uint8);
+  }
   
   // TODO: remove this once we can detect fade-in instead
   if (cvars::ge_always_allow_inputs) {
@@ -238,19 +243,16 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
     if (player_aim_mode != prev_aim_mode_) {
       if (player_aim_mode != 0) {
         // Entering aim mode, reset gun position
-        if (game_addrs.player_offset_gun_x) {
+        if (game_addrs.player_offset_gun_x && game_addrs.player_offset_gun_y) {
           *player_gun_x = 0;
-        }
-        if (game_addrs.player_offset_gun_y) {
           *player_gun_y = 0;
         }
       }
       // Always reset crosshair after entering/exiting aim mode
       // Otherwise non-aim-mode will still fire toward it...
-      if (game_addrs.player_offset_crosshair_x) {
+      if (game_addrs.player_offset_crosshair_x &&
+          game_addrs.player_offset_crosshair_y) {
         *player_crosshair_x = 0;
-      }
-      if (game_addrs.player_offset_crosshair_y) {
         *player_crosshair_y = 0;
       }
       prev_aim_mode_ = player_aim_mode;
@@ -410,20 +412,22 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
       }
     }
 
-    if (out_state->gamepad.right_trigger != 0) {
-      // firing, force gun to center
-      gX = gY = 0;
-    }
+    if (game_addrs.player_offset_gun_x && game_addrs.player_offset_gun_y) {
+      gX = std::min(gX, 1.f);
+      gX = std::max(gX, -1.f);
+      gY = std::min(gY, 1.f);
+      gY = std::max(gY, -1.f);
 
-    gX = std::min(gX, 1.f);
-    gX = std::max(gX, -1.f);
-    gY = std::min(gY, 1.f);
-    gY = std::max(gY, -1.f);
+      if (out_state->gamepad.right_trigger != 0) {
+        // Make crosshair match gun rotation, so it'll fire where gun is facing
+        if (game_addrs.player_offset_crosshair_x &&
+            game_addrs.player_offset_crosshair_y) {
+          *player_crosshair_x = gX;
+          *player_crosshair_y = gY;
+        }
+      }
 
-    if (game_addrs.player_offset_gun_x) {
       *player_gun_x = gX;
-    }
-    if (game_addrs.player_offset_gun_y) {
       *player_gun_y = gY;
     }
   }
