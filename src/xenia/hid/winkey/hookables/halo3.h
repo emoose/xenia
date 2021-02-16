@@ -37,8 +37,14 @@ class Halo3Game : public HookableGame {
     // Halo: Reach
     Release_566C10D3_11860,  // Jul 24 2010, TU0, media ID 566C10D3, v0.0.0.1
                              // (11860.10.07.24.0147.omaha_relea)
-    Release_566C10D3_12065   // Aug 24 2011, TU1, media ID 566C10D3, v0.0.1.1
+    Release_566C10D3_12065,  // Aug 24 2011, TU1, media ID 566C10D3, v0.0.1.1
                              // (12065.11.08.24.1738.tu1actual)
+
+    // Halo 4
+    Release_1C9D20BC_20810,  // Sep 22 2012, TU0, media ID 1C9D20BC, v0.0.0.15
+                             // (20810.12.09.22.1647.main)
+    Release_1C9D20BC_21522,  // Oct 17 2013, TU8/TU10? media ID 1C9D20BC
+                             // v0.0.10.15 (21522.13.10.17.1936.main)
   };
 
   ~Halo3Game() override;

@@ -84,7 +84,24 @@ std::map<Halo3Game::GameBuild, GameBuildAddrs> supported_builds{
   {
     Halo3Game::GameBuild::Release_566C10D3_12065,
     {"12065.11.08.24.1738.tu1actual", 0x82048BCC, 0x74, 0x94, 0x98}
+  },
+  {
+    Halo3Game::GameBuild::Release_1C9D20BC_20810,
+    {"20810.12.09.22.1647.main", 0x82129D78, 0x64, 0x134, 0x138}
+  },
+  {
+    Halo3Game::GameBuild::Release_1C9D20BC_21522,
+    {"21522.13.10.17.1936.main", 0x82137090, 0x64, 0x134, 0x138}
   }
+
+  // H4 TODO: 
+  // - 20975.12.10.25.1337.main 82129FB8 TU1 v0.0.1.15
+  // - 21122.12.11.21.0101.main 8212A2E8 TU2 v0.0.2.15
+  // - 21165.12.12.12.0112.main 8212A2E8 TU3 v0.0.3.15
+  // - 21339.13.02.05.0117.main 8212A890 TU4 v0.0.4.15
+  // - 21391.13.03.13.1711.main 821365D0 TU5 v0.0.5.15
+  // - 21401.13.04.23.1849.main 82136788 TU6 v0.0.6.15
+  // - 21501.13.08.06.2311.main ? (mentioned in TU8 xex)
 };
 
 bool Halo3Game::IsGameSupported() {
