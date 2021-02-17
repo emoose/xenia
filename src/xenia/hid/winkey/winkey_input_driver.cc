@@ -79,9 +79,21 @@ static const std::unordered_map<std::string, uint32_t> kKeyMap = {
     {"mouse5", VK_XBUTTON2},
     {"mwheelup", VK_BIND_MWHEELUP},
     {"mwheeldown", VK_BIND_MWHEELDOWN},
-    {"control", VK_CONTROL},
-    {"ctrl", VK_CONTROL},
-    {"alt", VK_MENU},
+
+    {"control", VK_LCONTROL},
+    {"ctrl", VK_LCONTROL},
+    {"alt", VK_LMENU},
+    {"lcontrol", VK_LCONTROL},
+    {"lctrl", VK_LCONTROL},
+    {"lalt", VK_LMENU},
+    {"rcontrol", VK_RCONTROL},
+    {"rctrl", VK_RCONTROL},
+    {"altgr", VK_RMENU},
+    {"ralt", VK_RMENU},
+
+    {"lshift", VK_LSHIFT},
+    {"shift", VK_LSHIFT},
+
     {"backspace", VK_BACK},
     {"down", VK_DOWN},
     {"left", VK_LEFT},
@@ -95,6 +107,7 @@ static const std::unordered_map<std::string, uint32_t> kKeyMap = {
     {"pgup", VK_PRIOR},
     {"return", VK_RETURN},
     {"enter", VK_RETURN},
+    {"renter", VK_SEPARATOR},
     {"space", VK_SPACE},
     {"tab", VK_TAB},
     {"f1", VK_F1},
@@ -132,6 +145,7 @@ static const std::unordered_map<std::string, uint32_t> kKeyMap = {
     {"num*", VK_MULTIPLY},
     {"num/", VK_DIVIDE},
     {"num.", VK_DECIMAL},
+    {"numenter", VK_SEPARATOR},
     {";", VK_OEM_1},
     {":", VK_OEM_1},
     {"=", VK_OEM_PLUS},
@@ -449,7 +463,7 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
       state.key_states = key_states_;
 
       // Handle key bindings
-      if (IS_KEY_DOWN(VK_SHIFT)) {
+      if (IS_KEY_DOWN(VK_RSHIFT)) {
         // RS toggled
         if (IS_KEY_DOWN('A')) {
           // A

@@ -550,8 +550,110 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
       } else if (rawinput_data_.header.dwType == RIM_TYPEKEYBOARD) {
         const auto& keyData = rawinput_data_.data.keyboard;
 
-        auto e = KeyEvent(this, keyData.VKey, 0, !keyData.Flags, false, false,
-                          false, false);
+        // Adjust VK code passed to handlers
+        // Based on https://blog.molecular-matters.com/2011/09/05/properly-handling-keyboard-input/
+        auto vkey = keyData.VKey;
+        bool isE0 = (keyData.Flags & RI_KEY_E0) != 0;
+
+        // discard "fake keys" which are part of an escaped sequence
+        if (vkey == 255) {
+          return 0;
+        } else if (vkey == VK_SHIFT) {
+          // correct left-hand / right-hand SHIFT
+          vkey = MapVirtualKey(keyData.MakeCode, MAPVK_VSC_TO_VK_EX);
+        } else {
+          switch (vkey) {
+            // right-hand CONTROL and ALT have their e0 bit set
+            case VK_CONTROL:
+              vkey = isE0 ? VK_RCONTROL : VK_LCONTROL;
+              break;
+
+            case VK_MENU:
+              vkey = isE0 ? VK_RMENU : VK_LMENU;
+              break;
+
+            case VK_RETURN:
+              if (isE0) {
+                vkey = VK_SEPARATOR;
+              }
+              break;
+
+            // the standard INSERT, DELETE, HOME, END, PRIOR and NEXT keys will
+            // always have their e0 bit set, but the corresponding keys on the
+            // NUMPAD will not.
+            case VK_INSERT:
+              if (!isE0) {
+                vkey = VK_NUMPAD0;
+              }
+              break;
+
+            case VK_DELETE:
+              if (!isE0) {
+                vkey = VK_DECIMAL;
+              }
+              break;
+
+            case VK_HOME:
+              if (!isE0) {
+                vkey = VK_NUMPAD7;
+              }
+              break;
+
+            case VK_END:
+              if (!isE0) {
+                vkey = VK_NUMPAD1;
+              }
+              break;
+
+            case VK_PRIOR:
+              if (!isE0) {
+                vkey = VK_NUMPAD9;
+              }
+              break;
+
+            case VK_NEXT:
+              if (!isE0) {
+                vkey = VK_NUMPAD3;
+              }
+              break;
+
+            // the standard arrow keys will always have their e0 bit set, but
+            // the corresponding keys on the NUMPAD will not.
+            case VK_LEFT:
+              if (!isE0) {
+                vkey = VK_NUMPAD4;
+              }
+              break;
+
+            case VK_RIGHT:
+              if (!isE0) {
+                vkey = VK_NUMPAD6;
+              }
+              break;
+
+            case VK_UP:
+              if (!isE0) {
+                vkey = VK_NUMPAD8;
+              }
+              break;
+
+            case VK_DOWN:
+              if (!isE0) {
+                vkey = VK_NUMPAD2;
+              }
+              break;
+
+            // NUMPAD 5 doesn't have its e0 bit set
+            case VK_CLEAR:
+              if (!isE0) {
+                vkey = VK_NUMPAD5;
+              }
+              break;
+          }
+        }
+
+        auto e = KeyEvent(this, vkey, 0, !(keyData.Flags & RI_KEY_BREAK), false,
+                          false, false, false);
 
         OnRawKeyboard(&e);
         return 0;
