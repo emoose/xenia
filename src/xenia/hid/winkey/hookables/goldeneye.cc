@@ -350,13 +350,12 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
       *player_cam_y = camY;
     }
 
-    time_start_center_ = time + std::chrono::milliseconds(50);
     start_centering_ = true;
     disable_sway_ = true;     // skip weapon sway until we've centered
     centering_speed_ = 0.05f; // speed up centering from aim-mode
   } else {
-    // Apply gun-centering once enough time has passed
-    if (start_centering_ && time >= time_start_center_) {
+    // Apply gun-centering
+    if (start_centering_) {
       if (gX != 0 || gY != 0) {
         if (gX > 0) {
           gX -= std::min(centering_speed_, gX);
@@ -428,7 +427,6 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
       }
     } else {
       if (!start_centering_) {
-        time_start_center_ = time + std::chrono::milliseconds(100);
         start_centering_ = true;
         centering_speed_ = 0.0125f;
       }
