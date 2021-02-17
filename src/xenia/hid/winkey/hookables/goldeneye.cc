@@ -77,6 +77,11 @@ std::map<GoldeneyeGame::GameBuild, RareGameBuildAddrs> supported_builds = {
           0x908, 0, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C, 0x11AC}
     },
     {
+      GoldeneyeGame::GameBuild::PerfectDark_Devkit_33,
+        {0x825CBC59, 0x30303333, 0, 0, 0, 0x826284C4, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
+          0, 0, 0}
+    },
+    {
       GoldeneyeGame::GameBuild::PerfectDark_Release_52,
         {0x825EC0E5, 0x30303532, 0, 0, 0, 0x8264909C, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
           0, 0, 0}

@@ -21,8 +21,9 @@ class GoldeneyeGame : public HookableGame {
  public:
   enum class GameBuild {
     Unknown = 0,
-    GoldenEye_Aug2007 = 0x584108A9,
-    PerfectDark_Release_52 = 0x584109C2, // 10.02.16.0052
+    GoldenEye_Aug2007,
+    PerfectDark_Devkit_33,   // 09.12.03.0033
+    PerfectDark_Release_52,  // 10.02.16.0052
     PerfectDark_Devkit_102,  // 10.03.04.0102
     PerfectDark_Release_104, // 10.03.07.0104
     PerfectDark_Release_107, // 10.04.13.0107
