@@ -43,7 +43,6 @@ class GoldeneyeGame : public HookableGame {
   uint32_t prev_game_control_active_ = -1;
 
   float centering_speed_ = 0.0125f;
-  xe::kernel::XClock::time_point time_start_center_;
   bool start_centering_ = false;
   bool disable_sway_ = false;  // temporarily prevents sway being applied
 };
