@@ -40,7 +40,7 @@ class GoldeneyeGame : public HookableGame {
 
   uint32_t prev_aim_mode_ = 0;
   uint32_t prev_game_pause_flag_ = -1;
-  uint32_t prev_game_control_active_ = -1;
+  uint32_t prev_game_control_disabled_ = -1;
 
   float centering_speed_ = 0.0125f;
   bool start_centering_ = false;
