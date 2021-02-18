@@ -754,6 +754,12 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         patch_addr(0x820A45D0, 0x4800003C);
         patch_addr(0x820A46D4, 0x4800003C);
 
+        // Hide "return to arcade" menu option
+        patch_addr(0x820F7750, 0x2F1E0007);
+        patch_addr(0x820F7D04, 0x2F1A0007);
+        // Prevent "return to arcade" code from being executed
+        patch_addr(0x820F7780, 0x2B0A0003);
+
         if (cvars::remove_blur) {
           // Patch out N64 blur
           // Source:
