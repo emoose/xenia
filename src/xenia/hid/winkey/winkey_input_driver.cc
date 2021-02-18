@@ -26,7 +26,7 @@ DEFINE_bool(swap_wheel, false,
             "MouseHook");
 DEFINE_double(sensitivity, 1, "Mouse sensitivity", "MouseHook");
 DEFINE_bool(disable_autoaim, true,
-            "Disable autoaim in games that support it (only GE currently)",
+            "Disable autoaim in games that support it (currently GE & PD)",
             "MouseHook");
 
 const uint32_t kTitleIdDefaultBindings = 0;
