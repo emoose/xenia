@@ -60,7 +60,6 @@ struct RareGameBuildAddrs {
 
   uint32_t player_offset_watch_status; // some watch-status counter, if non-zero then game is paused
   uint32_t player_offset_disabled;  // offset to "is control disabled" flag
-  uint32_t player_offset_active_uint8;  // offset to uint8 "is control active/enabled" flag
   uint32_t player_offset_cam_x;   // offset to camera X pos
   uint32_t player_offset_cam_y;   // offset to camera Y pos
   uint32_t player_offset_crosshair_x;
@@ -75,35 +74,38 @@ std::map<GoldeneyeGame::GameBuild, RareGameBuildAddrs> supported_builds = {
     {
       GoldeneyeGame::GameBuild::GoldenEye_Aug2007,
         {0x8200336C, 0x676f6c64, 0x8272B37C, 0x82F1E70C, 0x83088228, 0x82F1FA98,
-        0x2E8, 0x80, 0, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C,
+        0x2E8, 0x80, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C,
         0x11AC}
     },
+    // PD: player_offset_disabled seems to be stored at 0x0
+    // PD TODO: 0x104 almost seems like a good player_watch_status, but
+    // unfortunately gets triggered when health bar appears...
     {
       GoldeneyeGame::GameBuild::PerfectDark_Devkit_33,
-        {0x825CBC59, 0x30303333, 0, 0, 0x82620E08, 0x826284C4, 0, 0, 0x668, 0x14C, 0x15C, 
-          0, 0, 0, 0, 0, 0}
+        {0x825CBC59, 0x30303333, 0, 0, 0x82620E08, 0x826284C4, 0, 0x0, 0x14C, 0x15C, 
+          0, 0, 0, 0, 0x128, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_52,
-        {0x825EC0E5, 0x30303532, 0, 0, 0x826419C0, 0x8264909C, 0, 0, 0x668, 0x14C, 0x15C, 
-          0, 0, 0, 0, 0, 0}
+        {0x825EC0E5, 0x30303532, 0, 0, 0x826419C0, 0x8264909C, 0, 0x0, 0x14C, 0x15C, 
+          0, 0, 0, 0, 0x128, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Devkit_102,
-        {0x825EC0E5, 0x30313032, 0, 0, 0x82641A80, 0x82649274, 0, 0, 0x668, 0x14C, 0x15C, 
-          0, 0, 0, 0, 0, 0}
+        {0x825EC0E5, 0x30313032, 0, 0, 0x82641A80, 0x82649274, 0x1A4C, 0x0, 0x14C, 0x15C, 
+          0, 0, 0, 0, 0x128, 0}
     },
     // TODO: test these!
     /*
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_104,
-        {0x825EC0D5, 0x30313034, 0, 0, 0x82641A80, 0x82649264, 0, 0, 0x668, 0x14C, 0x15C, 
-          0, 0, 0, 0, 0, 0}
+        {0x825EC0D5, 0x30313034, 0, 0, 0x82641A80, 0x82649264, 0, 0x0, 0x14C, 0x15C, 
+          0, 0, 0, 0, 0x128, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_107,
-        {0x825FC25D, 0x30313037, 0, 0, 0x8265A200, 0x826619E4, 0, 0, 0x668, 0x14C, 0x15C, 
-          0, 0, 0, 0, 0, 0}
+        {0x825FC25D, 0x30313037, 0, 0, 0x8265A200, 0x826619E4, 0, 0x0, 0x14C, 0x15C, 
+          0, 0, 0, 0, 0x128, 0}
     },*/
 };
 
@@ -178,17 +180,8 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
 
   // First check if control-disabled flag is set (eg. we're in a cutscene)
   uint32_t game_control_disabled = 0;
-  if (game_addrs.player_offset_disabled) {
-    game_control_disabled =
-        *(xe::be<uint32_t>*)(player + game_addrs.player_offset_disabled);
-  }
-
-  // PD uses 1-byte flag for this? (maybe just need to find better offset)
-  if (game_addrs.player_offset_active_uint8) {
-    // TODO: find the disabled flag in PD
-    game_control_disabled =
-        !*(uint8_t*)(player + game_addrs.player_offset_active_uint8);
-  }
+  game_control_disabled =
+      *(xe::be<uint32_t>*)(player + game_addrs.player_offset_disabled);
 
   // Disable camera if watch is being brought up/lowered
   if (game_control_disabled == 0 && game_addrs.player_offset_watch_status) {
@@ -324,12 +317,14 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
     }
   }
 
+  // Have to do weird things converting it to normal float otherwise
+  // xe::be += treats things as int?
   float gX = game_addrs.player_offset_gun_x ? *player_gun_x : 0.f;
   float gY = game_addrs.player_offset_gun_y ? *player_gun_y : 0.f;
 
-  // Have to do weird things converting it to normal float otherwise
-  // xe::be += treats things as int?
-  if (player_aim_mode == 1) {
+  // Only support aim-mode in GE atm as PD uses different coordinate system >.>
+  if (player_aim_mode == 1 && game_build_ == GameBuild::GoldenEye_Aug2007) {
+
     float chX = *player_crosshair_x;
     float chY = *player_crosshair_y;
 
