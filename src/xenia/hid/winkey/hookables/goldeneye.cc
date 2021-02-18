@@ -424,9 +424,9 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
               (float)cvars::sensitivity;
           
       // Add 'sway' to gun
-      float gun_sway_x = (((float)input_state.mouse.x_delta) / 4000.f) *
+      float gun_sway_x = (((float)input_state.mouse.x_delta) / 8000.f) *
                           (float)cvars::sensitivity;
-      float gun_sway_y = (((float)input_state.mouse.y_delta) / 4000.f) *
+      float gun_sway_y = (((float)input_state.mouse.y_delta) / 8000.f) *
                           (float)cvars::sensitivity;
 
       float gun_sway_x_changed = gX + gun_sway_x;
