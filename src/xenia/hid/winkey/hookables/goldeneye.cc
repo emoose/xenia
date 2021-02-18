@@ -80,30 +80,30 @@ std::map<GoldeneyeGame::GameBuild, RareGameBuildAddrs> supported_builds = {
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Devkit_33,
-        {0x825CBC59, 0x30303333, 0, 0, 0, 0x826284C4, 0, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
-          0, 0, 0}
+        {0x825CBC59, 0x30303333, 0, 0, 0x82620E08, 0x826284C4, 0, 0, 0x668, 0x14C, 0x15C, 
+          0, 0, 0, 0, 0, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_52,
-        {0x825EC0E5, 0x30303532, 0, 0, 0, 0x8264909C, 0, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
-          0, 0, 0}
+        {0x825EC0E5, 0x30303532, 0, 0, 0x826419C0, 0x8264909C, 0, 0, 0x668, 0x14C, 0x15C, 
+          0, 0, 0, 0, 0, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Devkit_102,
-        {0x825EC0E5, 0x30313032, 0, 0, 0, 0x82649274, 0, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
-          0, 0, 0}
+        {0x825EC0E5, 0x30313032, 0, 0, 0x82641A80, 0x82649274, 0, 0, 0x668, 0x14C, 0x15C, 
+          0, 0, 0, 0, 0, 0}
     },
     // TODO: test these!
     /*
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_104,
-        {0x825EC0D5, 0x30313034, 0, 0, 0, 0x82649264, 0, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
-          0, 0, 0}
+        {0x825EC0D5, 0x30313034, 0, 0, 0x82641A80, 0x82649264, 0, 0, 0x668, 0x14C, 0x15C, 
+          0, 0, 0, 0, 0, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_107,
-        {0x825FC25D, 0x30313037, 0, 0, 0, 0x826619E4, 0, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
-          0, 0, 0}
+        {0x825FC25D, 0x30313037, 0, 0, 0x8265A200, 0x826619E4, 0, 0, 0x668, 0x14C, 0x15C, 
+          0, 0, 0, 0, 0, 0}
     },*/
 };
 
@@ -208,38 +208,72 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
       game_control_disabled != prev_game_control_disabled_) {
 
     if (game_addrs.settings_addr) {
-      auto settings_addr =
-          *kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(
+      auto settings_ptr =
+          kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(
               game_addrs.settings_addr);
 
-      if (settings_addr) {
-        auto* settings_ptr =
-            kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(settings_addr +
-                                                                 0x298);
-        uint32_t settings = *settings_ptr;
+      if (settings_ptr) {
 
-        enum GESettingFlag {
-          LookUpright = 0x8,  // non-inverted
-          AutoAim = 0x10,
-          AimControlToggle = 0x20,
-          ShowAimCrosshair = 0x40,
-          LookAhead = 0x80,
-          ShowAmmoCounter = 0x100,
-          ShowAimBorder = 0x200,
-          ScreenLetterboxWide = 0x400,
-          ScreenLetterboxCinema = 0x800,
-          ScreenRatio16_9 = 0x1000,
-          ScreenRatio16_10 = 0x2000,
-          CameraRoll = 0x40000
-        };
+        // GE points to settings struct which gets allocated somewhere random in memory
+        // PD's settings always seem to be in .data section though
+        if (game_build_ == GameBuild::GoldenEye_Aug2007) {
+          settings_ptr = kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(
+              *settings_ptr + 0x298);
+          uint32_t settings = *settings_ptr;
 
-        // Disable AutoAim & LookAhead
-        settings = settings & ~((uint32_t)GESettingFlag::LookAhead);
-        if (cvars::disable_autoaim) {
-          settings = settings & ~((uint32_t)GESettingFlag::AutoAim);
+          enum GESettingFlag {
+            LookUpright = 0x8,  // non-inverted
+            AutoAim = 0x10,
+            AimControlToggle = 0x20,
+            ShowAimCrosshair = 0x40,
+            LookAhead = 0x80,
+            ShowAmmoCounter = 0x100,
+            ShowAimBorder = 0x200,
+            ScreenLetterboxWide = 0x400,
+            ScreenLetterboxCinema = 0x800,
+            ScreenRatio16_9 = 0x1000,
+            ScreenRatio16_10 = 0x2000,
+            CameraRoll = 0x40000
+          };
+
+          // Disable AutoAim & LookAhead
+          if (settings & GESettingFlag::LookAhead) {
+            settings = settings & ~((uint32_t)GESettingFlag::LookAhead);
+          }
+          if (cvars::disable_autoaim && (settings & GESettingFlag::AutoAim)) {
+            settings = settings & ~((uint32_t)GESettingFlag::AutoAim);
+          }
+          *settings_ptr = settings;
+        } else {
+          uint32_t settings = *settings_ptr;
+
+          enum PDSettingFlag {
+            ReversePitch = 0x1,
+            LookAhead = 0x2,
+            SightOnScreen = 0x4,
+            AutoAim = 0x8,
+            AimControlToggle = 0x10,
+            AmmoOnScreen = 0x20,
+            ShowGunFunction = 0x40,
+            HeadRoll = 0x80,
+            InGameSubtitles = 0x100,
+            AlwaysShowTarget = 0x200,
+            ShowZoomRange = 0x400,
+            Paintball = 0x800,
+            CutsceneSubtitles = 0x1000,
+            ShowCrouch = 0x2000,
+            ShowMissionTime = 0x8000,
+          };
+
+          // Disable AutoAim & LookAhead
+          if (settings & PDSettingFlag::LookAhead) {
+            settings = settings & ~((uint32_t)PDSettingFlag::LookAhead);
+          }
+          if (cvars::disable_autoaim && (settings & PDSettingFlag::AutoAim)) {
+            settings = settings & ~((uint32_t)PDSettingFlag::AutoAim);
+          }
+          *settings_ptr = settings;
         }
-
-        *settings_ptr = settings;
       }
 
       prev_game_pause_flag_ = game_pause_flag;
