@@ -58,6 +58,7 @@ struct RareGameBuildAddrs {
 
   uint32_t player_addr;  // addr to pointer of player data
 
+  uint32_t player_offset_watch_status; // some watch-status counter, if non-zero then game is paused
   uint32_t player_offset_disabled;  // offset to "is control disabled" flag
   uint32_t player_offset_active_uint8;  // offset to uint8 "is control active/enabled" flag
   uint32_t player_offset_cam_x;   // offset to camera X pos
@@ -74,33 +75,34 @@ std::map<GoldeneyeGame::GameBuild, RareGameBuildAddrs> supported_builds = {
     {
       GoldeneyeGame::GameBuild::GoldenEye_Aug2007,
         {0x8200336C, 0x676f6c64, 0x8272B37C, 0x82F1E70C, 0x83088228, 0x82F1FA98,
-          0x80, 0, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C, 0x11AC}
+        0x2E8, 0x80, 0, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C,
+        0x11AC}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Devkit_33,
-        {0x825CBC59, 0x30303333, 0, 0, 0, 0x826284C4, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
+        {0x825CBC59, 0x30303333, 0, 0, 0, 0x826284C4, 0, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
           0, 0, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_52,
-        {0x825EC0E5, 0x30303532, 0, 0, 0, 0x8264909C, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
+        {0x825EC0E5, 0x30303532, 0, 0, 0, 0x8264909C, 0, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
           0, 0, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Devkit_102,
-        {0x825EC0E5, 0x30313032, 0, 0, 0, 0x82649274, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
+        {0x825EC0E5, 0x30313032, 0, 0, 0, 0x82649274, 0, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
           0, 0, 0}
     },
     // TODO: test these!
     /*
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_104,
-        {0x825EC0D5, 0x30313034, 0, 0, 0, 0x82649264, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
+        {0x825EC0D5, 0x30313034, 0, 0, 0, 0x82649264, 0, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
           0, 0, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_107,
-        {0x825FC25D, 0x30313037, 0, 0, 0, 0x826619E4, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
+        {0x825FC25D, 0x30313037, 0, 0, 0, 0x826619E4, 0, 0, 0x668, 0x14C, 0x15C, 0, 0, 0,
           0, 0, 0}
     },*/
 };
@@ -174,18 +176,25 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
         game_addrs.game_pause_addr);
   }
 
-  // TODO: find better game_control_disabled byte, this doesn't handle the delay
-  // when watch is brought up/down
-  // TODO: +0x2E8 = some kind of watch-status dword?
+  // First check if control-disabled flag is set (eg. we're in a cutscene)
   uint32_t game_control_disabled = 0;
   if (game_addrs.player_offset_disabled) {
     game_control_disabled =
         *(xe::be<uint32_t>*)(player + game_addrs.player_offset_disabled);
   }
+
+  // PD uses 1-byte flag for this? (maybe just need to find better offset)
   if (game_addrs.player_offset_active_uint8) {
     // TODO: find the disabled flag in PD
     game_control_disabled =
         !*(uint8_t*)(player + game_addrs.player_offset_active_uint8);
+  }
+
+  // Disable camera if watch is being brought up/lowered
+  if (game_control_disabled == 0 && game_addrs.player_offset_watch_status) {
+    // non-zero watch_status seems to disable controller inputs, so we'll do the same
+    game_control_disabled =
+        *(xe::be<uint32_t>*)(player + game_addrs.player_offset_watch_status);
   }
   
   // TODO: remove this once we can detect fade-in instead
