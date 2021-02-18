@@ -455,6 +455,29 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
   return true;
 }
 
+// GE modifier reduces LS-movement, to allow for walk speed to be reduced
+// (ie a 'walk' button)
+bool GoldeneyeGame::ModifierKeyHandler(uint32_t user_index,
+  RawInputState& input_state,
+  X_INPUT_STATE* out_state) {
+
+  float thumb_lx = (int16_t)out_state->gamepad.thumb_lx;
+  float thumb_ly = (int16_t)out_state->gamepad.thumb_ly;
+
+  // Work out angle from the current stick values
+  float angle = atan2f(thumb_ly, thumb_lx);
+
+  // Sticks get set to SHRT_MAX if key pressed, use half of that
+  float distance = (float)SHRT_MAX;
+  distance /= 2;
+
+  out_state->gamepad.thumb_lx = (int16_t)(distance * cosf(angle));
+  out_state->gamepad.thumb_ly = (int16_t)(distance * sinf(angle));
+
+  // Return true to signal that we've handled the modifier, so default modifier won't be used
+  return true;
+}
+
 }  // namespace winkey
 }  // namespace hid
 }  // namespace xe
