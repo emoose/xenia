@@ -58,7 +58,7 @@ struct RareGameBuildAddrs {
 
   uint32_t player_addr;  // addr to pointer of player data
 
-  uint32_t player_offset_active;  // offset to "is control active/enabled" flag
+  uint32_t player_offset_disabled;  // offset to "is control disabled" flag
   uint32_t player_offset_active_uint8;  // offset to uint8 "is control active/enabled" flag
   uint32_t player_offset_cam_x;   // offset to camera X pos
   uint32_t player_offset_cam_y;   // offset to camera Y pos
@@ -74,7 +74,7 @@ std::map<GoldeneyeGame::GameBuild, RareGameBuildAddrs> supported_builds = {
     {
       GoldeneyeGame::GameBuild::GoldenEye_Aug2007,
         {0x8200336C, 0x676f6c64, 0x8272B37C, 0x82F1E70C, 0x83088228, 0x82F1FA98,
-          0x908, 0, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C, 0x11AC}
+          0x80, 0, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C, 0x11AC}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Devkit_33,
@@ -174,29 +174,29 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
         game_addrs.game_pause_addr);
   }
 
-  // TODO: find better game_control_active byte, this doesn't handle the delay
+  // TODO: find better game_control_disabled byte, this doesn't handle the delay
   // when watch is brought up/down
-  // also apparently doesn't get set until fade-in is complete (while controller
-  // is active during the fade instead)
-  uint32_t game_control_active = 1;
-  if (game_addrs.player_offset_active) {
-    game_control_active =
-        *(xe::be<uint32_t>*)(player + game_addrs.player_offset_active);
+  // TODO: +0x2E8 = some kind of watch-status dword?
+  uint32_t game_control_disabled = 0;
+  if (game_addrs.player_offset_disabled) {
+    game_control_disabled =
+        *(xe::be<uint32_t>*)(player + game_addrs.player_offset_disabled);
   }
   if (game_addrs.player_offset_active_uint8) {
-    game_control_active =
-        *(uint8_t*)(player + game_addrs.player_offset_active_uint8);
+    // TODO: find the disabled flag in PD
+    game_control_disabled =
+        !*(uint8_t*)(player + game_addrs.player_offset_active_uint8);
   }
   
   // TODO: remove this once we can detect fade-in instead
   if (cvars::ge_always_allow_inputs) {
-    game_control_active = 1;
+    game_control_disabled = 0;
   }
 
   // Disable auto-aim & lookahead
   // (only if we detect game_control_active or game_pause_flag values are changing)
   if (game_pause_flag != prev_game_pause_flag_ ||
-      game_control_active != prev_game_control_active_) {
+      game_control_disabled != prev_game_control_disabled_) {
 
     if (game_addrs.settings_addr) {
       auto settings_addr =
@@ -234,11 +234,11 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
       }
 
       prev_game_pause_flag_ = game_pause_flag;
-      prev_game_control_active_ = game_control_active;
+      prev_game_control_disabled_ = game_control_disabled;
     }
   }
 
-  if (!game_control_active) {
+  if (game_control_disabled) {
     return true;
   }
 
