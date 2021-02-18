@@ -182,6 +182,12 @@ bool Halo3Game::DoHooks(uint32_t user_index, RawInputState& input_state,
   return true;
 }
 
+bool Halo3Game::ModifierKeyHandler(uint32_t user_index,
+                                   RawInputState& input_state,
+                                   X_INPUT_STATE* out_state) {
+  // Defer to default modifier (swaps LS movement over to RS)
+  return false;
+}
 
 }  // namespace winkey
 }  // namespace hid

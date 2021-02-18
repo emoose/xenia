@@ -34,6 +34,8 @@ class GoldeneyeGame : public HookableGame {
   bool IsGameSupported();
   bool DoHooks(uint32_t user_index, RawInputState& input_state,
                X_INPUT_STATE* out_state);
+  bool ModifierKeyHandler(uint32_t user_index, RawInputState& input_state,
+                          X_INPUT_STATE* out_state);
 
  private:
   GameBuild game_build_ = GameBuild::Unknown;
