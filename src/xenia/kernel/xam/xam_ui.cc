@@ -274,11 +274,17 @@ dword_result_t XamShowMessageBoxUI(dword_t user_index, lpu16string_t title_ptr,
     buttons.push_back(xe::to_utf8(button));
   }
 
+  auto title_id = kernel_state()->title_id();
+
   X_RESULT result;
-  if (cvars::headless) {
+  if (cvars::headless || title_id == 0x584109C2) {
+    uint32_t active_btn = active_button;
+    if (title_id == 0x584109C2 && active_btn == 0) {
+      active_btn = 1;
+    }
     // Auto-pick the focused button.
-    auto run = [result_ptr, active_button]() -> X_RESULT {
-      *result_ptr = static_cast<uint32_t>(active_button);
+    auto run = [result_ptr, active_btn]() -> X_RESULT {
+      *result_ptr = static_cast<uint32_t>(active_btn);
       return X_ERROR_SUCCESS;
     };
     result = xeXamDispatchHeadless(run, overlapped);
