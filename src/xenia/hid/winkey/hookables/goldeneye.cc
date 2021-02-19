@@ -82,30 +82,30 @@ std::map<GoldeneyeGame::GameBuild, RareGameBuildAddrs> supported_builds = {
     // unfortunately gets triggered when health bar appears...
     {
       GoldeneyeGame::GameBuild::PerfectDark_Devkit_33,
-        {0x825CBC59, 0x30303333, 0, 0, 0x82620E08, 0x826284C4, 0, 0x0, 0x14C, 0x15C, 
-          0, 0, 0, 0, 0x128, 0}
+        {0x825CBC59, 0x30303333, 0, 0, 0x82620E08, 0x826284C4, 0x1A4C, 0x0, 0x14C,
+          0x15C, 0x1690, 0x1694, 0xCFC, 0xD00, 0x128, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_52,
-        {0x825EC0E5, 0x30303532, 0, 0, 0x826419C0, 0x8264909C, 0, 0x0, 0x14C, 0x15C, 
-          0, 0, 0, 0, 0x128, 0}
+        {0x825EC0E5, 0x30303532, 0, 0, 0x826419C0, 0x8264909C, 0x1A4C, 0x0, 0x14C,
+          0x15C, 0x1690, 0x1694, 0xCFC, 0xD00, 0x128, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Devkit_102,
-        {0x825EC0E5, 0x30313032, 0, 0, 0x82641A80, 0x82649274, 0x1A4C, 0x0, 0x14C, 0x15C, 
-          0, 0, 0, 0, 0x128, 0}
+        {0x825EC0E5, 0x30313032, 0, 0, 0x82641A80, 0x82649274, 0x1A4C, 0x0, 0x14C,
+          0x15C, 0x1690, 0x1694, 0xCFC, 0xD00, 0x128, 0}
     },
     // TODO: test these!
     /*
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_104,
-        {0x825EC0D5, 0x30313034, 0, 0, 0x82641A80, 0x82649264, 0, 0x0, 0x14C, 0x15C, 
-          0, 0, 0, 0, 0x128, 0}
+        {0x825EC0D5, 0x30313034, 0, 0, 0x82641A80, 0x82649264, 0x1A4C, 0x0, 0x14C,
+          0x15C, 0x1690, 0x1694, 0xCFC, 0xD00, 0x128, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_107,
-        {0x825FC25D, 0x30313037, 0, 0, 0x8265A200, 0x826619E4, 0, 0x0, 0x14C, 0x15C, 
-          0, 0, 0, 0, 0x128, 0}
+        {0x825FC25D, 0x30313037, 0, 0, 0x8265A200, 0x826619E4, 0x1A4C, 0x0, 0x14C,
+          0x15C, 0x1690, 0x1694, 0xCFC, 0xD00, 0x128, 0}
     },*/
 };
 
@@ -292,73 +292,70 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
   xe::be<float>* player_gun_y =
       (xe::be<float>*)(player + game_addrs.player_offset_gun_y);
 
-  uint32_t player_aim_mode = 0;
+  uint32_t player_aim_mode =
+      *(xe::be<uint32_t>*)(player + game_addrs.player_offset_aim_mode);
 
-  if (game_addrs.player_offset_aim_mode) {
-    player_aim_mode =
-        *(xe::be<uint32_t>*)(player + game_addrs.player_offset_aim_mode);
-
-    if (player_aim_mode != prev_aim_mode_) {
-      if (player_aim_mode != 0) {
-        // Entering aim mode, reset gun position
-        if (game_addrs.player_offset_gun_x && game_addrs.player_offset_gun_y) {
-          *player_gun_x = 0;
-          *player_gun_y = 0;
-        }
-      }
-      // Always reset crosshair after entering/exiting aim mode
-      // Otherwise non-aim-mode will still fire toward it...
-      if (game_addrs.player_offset_crosshair_x &&
-          game_addrs.player_offset_crosshair_y) {
-        *player_crosshair_x = 0;
-        *player_crosshair_y = 0;
-      }
-      prev_aim_mode_ = player_aim_mode;
+  if (player_aim_mode != prev_aim_mode_) {
+    if (player_aim_mode != 0) {
+      // Entering aim mode, reset gun position
+      *player_gun_x = 0;
+      *player_gun_y = 0;
     }
+    // Always reset crosshair after entering/exiting aim mode
+    // Otherwise non-aim-mode will still fire toward it...
+    *player_crosshair_x = 0;
+    *player_crosshair_y = 0;
+    prev_aim_mode_ = player_aim_mode;
   }
 
-  // Have to do weird things converting it to normal float otherwise
-  // xe::be += treats things as int?
-  float gX = game_addrs.player_offset_gun_x ? *player_gun_x : 0.f;
-  float gY = game_addrs.player_offset_gun_y ? *player_gun_y : 0.f;
+  // TODO: try and eliminate some of these...
+  float bounds = 1; // screen bounds of gun/crosshair
+  float dividor = 500.f;
+  float gun_multiplier = 1;
+  float crosshair_multiplier = 1;
+  float centering_multiplier = 1;
 
-  // Only support aim-mode in GE atm as PD uses different coordinate system >.>
-  if (player_aim_mode == 1 && game_build_ == GameBuild::GoldenEye_Aug2007) {
+  float aim_turn_distance = (float)cvars::aim_turn_distance;
+  float aim_turn_dividor = 1.f;
+
+  if (game_build_ != GameBuild::GoldenEye_Aug2007) {
+    // PD uses a different coordinate system to GE for some reason
+    // Following are best guesses for getting it to feel right:
+    bounds = 30.f;
+    dividor = 16.f;
+    gun_multiplier = 0.25f;
+    crosshair_multiplier = 4;
+    centering_multiplier = 25;
+    aim_turn_distance *= 30;
+    aim_turn_dividor = 20.f;
+  }
+
+  if (player_aim_mode == 1) {
 
     float chX = *player_crosshair_x;
     float chY = *player_crosshair_y;
 
-    chX += (((float)input_state.mouse.x_delta) / 500.f) *
+    chX += (((float)input_state.mouse.x_delta) / dividor) *
             (float)cvars::sensitivity;
-    gX += (((float)input_state.mouse.x_delta) / 500.f) *
-          (float)cvars::sensitivity;
 
     if (!cvars::invert_y) {
-      chY += (((float)input_state.mouse.y_delta) / 500.f) *
+      chY += (((float)input_state.mouse.y_delta) / dividor) *
               (float)cvars::sensitivity;
-      gY += (((float)input_state.mouse.y_delta) / 500.f) *
-            (float)cvars::sensitivity;
     } else {
-      chY -= (((float)input_state.mouse.y_delta) / 500.f) *
+      chY -= (((float)input_state.mouse.y_delta) / dividor) *
               (float)cvars::sensitivity;
-      gY -= (((float)input_state.mouse.y_delta) / 500.f) *
-            (float)cvars::sensitivity;
     }
 
     // Keep the gun/crosshair in-bounds [1:-1]
-    chX = std::min(chX, 1.f);
-    chX = std::max(chX, -1.f);
-    chY = std::min(chY, 1.f);
-    chY = std::max(chY, -1.f);
-    gX = std::min(gX, 1.f);
-    gX = std::max(gX, -1.f);
-    gY = std::min(gY, 1.f);
-    gY = std::max(gY, -1.f);
+    chX = std::min(chX, bounds);
+    chX = std::max(chX, -bounds);
+    chY = std::min(chY, bounds);
+    chY = std::max(chY, -bounds);
 
     *player_crosshair_x = chX;
     *player_crosshair_y = chY;
-    *player_gun_x = gX;
-    *player_gun_y = gY;
+    *player_gun_x = (chX * gun_multiplier);
+    *player_gun_y = (chY * gun_multiplier);
 
     // Turn camera when crosshair is past a certain point
     float camX = (float)*player_cam_x;
@@ -381,31 +378,34 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
 
     // TODO: see if we can find the algo the game itself uses
     float ch_distance = sqrtf((chX * chX) + (chY * chY));
-    if (ch_distance > cvars::aim_turn_distance) {
-      camX += (chX * aim_multiplier);
+    if (ch_distance > aim_turn_distance) {
+      camX += ((chX / aim_turn_dividor) * aim_multiplier);
       *player_cam_x = camX;
-      camY -= (chY * aim_multiplier);
+      camY -= ((chY / aim_turn_dividor) * aim_multiplier);
       *player_cam_y = camY;
     }
 
     start_centering_ = true;
-    disable_sway_ = true;     // skip weapon sway until we've centered
-    centering_speed_ = 0.05f; // speed up centering from aim-mode
+    disable_sway_ = true;      // skip weapon sway until we've centered
+    centering_speed_ = 0.05f;  // speed up centering from aim-mode
   } else {
+    float gX = *player_gun_x;
+    float gY = *player_gun_y;
+
     // Apply gun-centering
     if (start_centering_) {
       if (gX != 0 || gY != 0) {
         if (gX > 0) {
-          gX -= std::min(centering_speed_, gX);
+          gX -= std::min((centering_speed_ * centering_multiplier), gX);
         }
         if (gX < 0) {
-          gX += std::min(centering_speed_, -gX);
+          gX += std::min((centering_speed_ * centering_multiplier), -gX);
         }
         if (gY > 0) {
-          gY -= std::min(centering_speed_, gY);
+          gY -= std::min((centering_speed_ * centering_multiplier), gY);
         }
         if (gY < 0) {
-          gY += std::min(centering_speed_, -gY);
+          gY += std::min((centering_speed_ * centering_multiplier), -gY);
         }
       }
       if (gX == 0 && gY == 0) {
@@ -422,12 +422,12 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
 
       camX += (((float)input_state.mouse.x_delta) / 10.f) *
               (float)cvars::sensitivity;
-          
+
       // Add 'sway' to gun
-      float gun_sway_x = (((float)input_state.mouse.x_delta) / 8000.f) *
-                          (float)cvars::sensitivity;
-      float gun_sway_y = (((float)input_state.mouse.y_delta) / 8000.f) *
-                          (float)cvars::sensitivity;
+      float gun_sway_x = ((((float)input_state.mouse.x_delta) / 16000.f) *
+                         (float)cvars::sensitivity) * bounds;
+      float gun_sway_y = ((((float)input_state.mouse.y_delta) / 16000.f) *
+                         (float)cvars::sensitivity) * bounds;
 
       float gun_sway_x_changed = gX + gun_sway_x;
       float gun_sway_y_changed = gY + gun_sway_y;
@@ -447,16 +447,16 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
       if (cvars::ge_gun_sway && !disable_sway_) {
         // Bound the 'sway' movement to [0.2:-0.2] to make it look a bit
         // better (but only if the sway would make it go further OOB)
-        if (gun_sway_x_changed > 0.2f && gun_sway_x > 0) {
+        if (gun_sway_x_changed > (0.2f * bounds) && gun_sway_x > 0) {
           gun_sway_x_changed = gX;
         }
-        if (gun_sway_x_changed < -0.2f && gun_sway_x < 0) {
+        if (gun_sway_x_changed < -(0.2f * bounds) && gun_sway_x < 0) {
           gun_sway_x_changed = gX;
         }
-        if (gun_sway_y_changed > 0.2f && gun_sway_y > 0) {
+        if (gun_sway_y_changed > (0.2f * bounds) && gun_sway_y > 0) {
           gun_sway_y_changed = gY;
         }
-        if (gun_sway_y_changed < -0.2f && gun_sway_y < 0) {
+        if (gun_sway_y_changed < -(0.2f * bounds) && gun_sway_y < 0) {
           gun_sway_y_changed = gY;
         }
 
@@ -470,24 +470,15 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
       }
     }
 
-    if (game_addrs.player_offset_gun_x && game_addrs.player_offset_gun_y) {
-      gX = std::min(gX, 1.f);
-      gX = std::max(gX, -1.f);
-      gY = std::min(gY, 1.f);
-      gY = std::max(gY, -1.f);
+    gX = std::min(gX, bounds);
+    gX = std::max(gX, -bounds);
+    gY = std::min(gY, bounds);
+    gY = std::max(gY, -bounds);
 
-      if (out_state->gamepad.right_trigger != 0) {
-        // Make crosshair match gun rotation, so it'll fire where gun is facing
-        if (game_addrs.player_offset_crosshair_x &&
-            game_addrs.player_offset_crosshair_y) {
-          *player_crosshair_x = gX;
-          *player_crosshair_y = gY;
-        }
-      }
-
-      *player_gun_x = gX;
-      *player_gun_y = gY;
-    }
+    *player_crosshair_x = (gX * crosshair_multiplier);
+    *player_crosshair_y = (gY * crosshair_multiplier);
+    *player_gun_x = gX;
+    *player_gun_y = gY;
   }
 
   return true;
