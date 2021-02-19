@@ -21,21 +21,16 @@ DECLARE_double(sensitivity);
 DECLARE_bool(invert_y);
 DECLARE_bool(disable_autoaim);
 
-DEFINE_double(aim_turn_distance, 0.4f,
-              "(GoldenEye) Distance crosshair can move in aim-mode before "
+DEFINE_double(ge_aim_turn_distance, 0.4f,
+              "(GoldenEye/Perfect Dark) Distance crosshair can move in aim-mode before "
               "turning the camera [range 0 - 1]",
               "MouseHook");
 
 DEFINE_double(ge_menu_sensitivity, 0.5f,
               "(GoldenEye) Mouse sensitivity when in menus", "MouseHook");
 
-DEFINE_bool(ge_gun_sway, true, "(GoldenEye) Enable gun sway as camera is turned",
+DEFINE_bool(ge_gun_sway, true, "(GoldenEye/Perfect Dark) Enable gun sway as camera is turned",
             "MouseHook");
-
-DEFINE_bool(ge_always_allow_inputs, false,
-            "(GoldenEye) (TEMP) Skip the 'is-allowed-to-move' checks and "
-            "always allow camera movement, might break cutscenes, will be "
-            "removed once I find a way to check for fade-in instead.", "MouseHook");
 
 const uint32_t kTitleIdGoldenEye = 0x584108A9;
 const uint32_t kTitleIdPerfectDark = 0x584109C2;
@@ -189,11 +184,6 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
     game_control_disabled =
         *(xe::be<uint32_t>*)(player + game_addrs.player_offset_watch_status);
   }
-  
-  // TODO: remove this once we can detect fade-in instead
-  if (cvars::ge_always_allow_inputs) {
-    game_control_disabled = 0;
-  }
 
   // Disable auto-aim & lookahead
   // (only if we detect game_control_active or game_pause_flag values are changing)
@@ -315,7 +305,7 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
   float crosshair_multiplier = 1;
   float centering_multiplier = 1;
 
-  float aim_turn_distance = (float)cvars::aim_turn_distance;
+  float aim_turn_distance = (float)cvars::ge_aim_turn_distance;
   float aim_turn_dividor = 1.f;
 
   if (game_build_ != GameBuild::GoldenEye_Aug2007) {

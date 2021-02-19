@@ -56,9 +56,9 @@ DEFINE_string(
     "General");
 
 
-DEFINE_bool(remove_blur, false,
+DEFINE_bool(ge_remove_blur, false,
             "(GoldenEye) Removes low-res blur when in classic-graphics mode", "MouseHook");
-DEFINE_bool(debug_menu, false,
+DEFINE_bool(ge_debug_menu, false,
             "(GoldenEye) Enables the debug menu, accessible with LB/1", "MouseHook");
 
 namespace xe {
@@ -796,7 +796,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         // Prevent "return to arcade" code from being executed
         patch_addr(0x820F7780, 0x2B0A0003);
 
-        if (cvars::remove_blur) {
+        if (cvars::ge_remove_blur) {
           // Patch out N64 blur
           // Source:
           // https://github.com/xenia-canary/game-patches/blob/main/patches/584108A9.patch
@@ -804,7 +804,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
           patch_addr(0x82188E70, 0x60000000);
         }
 
-        if (cvars::debug_menu) {
+        if (cvars::ge_debug_menu) {
           // Enable debug menu
           patch_addr(0x82189F28, 0x2B0B0000);
         }
