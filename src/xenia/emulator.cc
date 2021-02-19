@@ -691,24 +691,60 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       }
     }
 
+    auto patch_addr = [module](uint32_t addr, uint32_t value) {
+      auto* patch_ptr =
+          (xe::be<uint32_t>*)module->memory()->TranslateVirtual(addr);
+      auto heap = module->memory()->LookupHeap(addr);
+
+      uint32_t old_protect = 0;
+      heap->Protect(addr, 4, kMemoryProtectRead | kMemoryProtectWrite,
+                    &old_protect);
+      *patch_ptr = value;
+      heap->Protect(addr, 4, old_protect);
+    };
+
+    if (module->title_id() == 0x584109C2) {
+      // Prevent game from writing RS thumbstick to crosshair/gun position
+      // Multiple PD revisions so we'll need to search the code...
+
+      std::vector<uint32_t> search_insns = {
+        0xD17F16A8, // stfs      f11, 0x16A8(r31)
+        0xD19F16A4, // stfs      f12, 0x16A4(r31)
+        0xD19F1690, // stfs      f12, 0x1690(r31)
+        0xD15F1694, // stfs      f10, 0x1694(r31)
+        0xD0FF0CFC, // stfs      f7, 0xCFC(r31)
+        0xD0BF0D00  // stfs      f5, 0xD00(r31)
+      };
+
+      int patched = 0;
+
+      auto* xex = module->xex_module();
+      auto* check_addr = (xe::be<uint32_t>*)module->memory()->TranslateVirtual(
+          xex->base_address());
+      auto* end_addr = (xe::be<uint32_t>*)module->memory()->TranslateVirtual(
+          xex->base_address() + xex->image_size());
+
+      while (end_addr > check_addr) {
+        auto value = *check_addr;
+
+        for (auto test : search_insns) {
+          if (test == value) {
+            uint32_t addr = module->memory()->HostToGuestVirtual(check_addr);
+            patch_addr(addr, 0x60000000);
+            patched++;
+            break;
+          }
+        }
+
+        check_addr++;
+      }
+    }
+
     if (module->title_id() == 0x584108A9) {
       // Check if this is the Aug 25th 2007 GE build
       auto* test_addr =
           (xe::be<uint32_t>*)module->memory()->TranslateVirtual(0x8200336C);
       if (*test_addr == 0x676f6c64) {
-
-        auto patch_addr = [module](uint32_t addr, uint32_t value) {
-          auto* patch_ptr =
-              (xe::be<uint32_t>*)module->memory()->TranslateVirtual(addr);
-          auto heap = module->memory()->LookupHeap(addr);
-
-          uint32_t old_protect = 0;
-          heap->Protect(addr, 4, kMemoryProtectRead | kMemoryProtectWrite,
-                        &old_protect);
-          *patch_ptr = value;
-          heap->Protect(addr, 4, old_protect);
-        };
-
         // Prevent game from overwriting crosshair/gun positions
         patch_addr(0x820A45D0, 0x4800003C);
         patch_addr(0x820A46D4, 0x4800003C);
