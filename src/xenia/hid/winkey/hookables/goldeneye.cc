@@ -67,8 +67,16 @@ struct RareGameBuildAddrs {
 
 std::map<GoldeneyeGame::GameBuild, RareGameBuildAddrs> supported_builds = {
     {
-      GoldeneyeGame::GameBuild::GoldenEye_Aug2007,
+      GoldeneyeGame::GameBuild::GoldenEye_Nov2007_Release,
         {0x8200336C, 0x676f6c64, 0x8272B37C, 0x82F1E70C, 0x83088228, 0x82F1FA98,
+        0x2E8, 0x80, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C,
+        0x11AC}
+    },
+
+    // TODO: unsure about 83A4EABC
+    {
+      GoldeneyeGame::GameBuild::GoldenEye_Nov2007_Debug,
+        {0x82005540, 0x676f6c64, 0x830C8564, 0x83A4EABC, 0x83BFC018, 0x83A50298,
         0x2E8, 0x80, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C,
         0x11AC}
     },
@@ -199,7 +207,9 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
 
         // GE points to settings struct which gets allocated somewhere random in memory
         // PD's settings always seem to be in .data section though
-        if (game_build_ == GameBuild::GoldenEye_Aug2007) {
+        if (game_build_ == GameBuild::GoldenEye_Nov2007_Release ||
+            game_build_ == GameBuild::GoldenEye_Nov2007_Team ||
+            game_build_ == GameBuild::GoldenEye_Nov2007_Debug) {
           settings_ptr = kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(
               *settings_ptr + 0x298);
           uint32_t settings = *settings_ptr;
@@ -308,7 +318,9 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
   float aim_turn_distance = (float)cvars::ge_aim_turn_distance;
   float aim_turn_dividor = 1.f;
 
-  if (game_build_ != GameBuild::GoldenEye_Aug2007) {
+  if (game_build_ != GameBuild::GoldenEye_Nov2007_Release &&
+      game_build_ != GameBuild::GoldenEye_Nov2007_Team &&
+      game_build_ != GameBuild::GoldenEye_Nov2007_Debug) {
     // PD uses a different coordinate system to GE for some reason
     // Following are best guesses for getting it to feel right:
     bounds = 30.f;
