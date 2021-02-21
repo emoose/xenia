@@ -75,7 +75,10 @@ dword_result_t DmWalkLoadedModules(lpdword_t unk0_ptr, lpdword_t unk1_ptr) {
 }
 DECLARE_XBDM_EXPORT1(DmWalkLoadedModules, kDebug, kStub);
 
-void DmMapDevkitDrive() {}
+dword_result_t DmMapDevkitDrive() { 
+  // TODO: mount devkit:\ here?
+  return X_STATUS_SUCCESS;
+}
 DECLARE_XBDM_EXPORT1(DmMapDevkitDrive, kDebug, kStub);
 
 dword_result_t DmFindPdbSignature(lpdword_t unk0_ptr, lpdword_t unk1_ptr) {
