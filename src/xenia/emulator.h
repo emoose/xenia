@@ -65,6 +65,9 @@ class Emulator {
   // Folder files safe to remove without significant side effects are stored in.
   const std::filesystem::path& cache_root() const { return cache_root_; }
 
+  // Host path of the executable being ran
+  const std::filesystem::path& executable_path() const { return executable_path_; }
+
   // Title of the game in the default language.
   const std::string& game_title() const { return game_title_; }
 
@@ -171,6 +174,7 @@ class Emulator {
   std::filesystem::path storage_root_;
   std::filesystem::path content_root_;
   std::filesystem::path cache_root_;
+  std::filesystem::path executable_path_;
 
   std::string game_title_;
 
