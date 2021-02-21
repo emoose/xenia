@@ -682,6 +682,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   title_id_ = std::nullopt;
   title_name_ = "";
   title_version_ = "";
+  executable_path_.clear();
   display_window_->SetIcon(nullptr, 0);
 
   // Allow xam to request module loads.
@@ -693,6 +694,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     XELOGE("Failed to load user module {}", xe::path_to_utf8(path));
     return X_STATUS_NOT_FOUND;
   }
+
+  executable_path_ = path;
 
   // Grab the current title ID.
   xex2_opt_execution_info* info = nullptr;

@@ -72,6 +72,9 @@ class Emulator {
   // Version of the title as a string.
   const std::string& title_version() const { return title_version_; }
 
+  // Host path of the executable being ran
+  const std::filesystem::path& executable_path() const { return executable_path_; }
+
   // Currently running title ID
   uint32_t title_id() const {
     return !title_id_.has_value() ? 0 : title_id_.value();
@@ -177,6 +180,7 @@ class Emulator {
   std::filesystem::path storage_root_;
   std::filesystem::path content_root_;
   std::filesystem::path cache_root_;
+  std::filesystem::path executable_path_;
 
   std::string title_name_;
   std::string title_version_;
