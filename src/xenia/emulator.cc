@@ -775,11 +775,20 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
            0x820F7780, 0x2B0A0003,
            0x82188E70, 0x82189F28},
 
+          // Nov 2007 Team build
+          {0x82003398, 0x676f6c64, 
+           0x820C85B0, 0x480000B0, 
+           0x820C88B8, 0x480000B0, 
+           0x8213ABE8, 0x2F0B0007, 
+           0x8213AF0C, 0x2F0B0007,
+           0x8213ACB4, 0x2B0B0004,
+           0x8221DF34, 0},
+
           // Nov 2007 Debug build
           {0x82005540, 0x676f6c64, 
            0x822A2BFC, 0x480000B0, 
            0x822A2F04, 0x480000B0, 
-           0x820F7750, 0x2F0B0007, 
+           0x82344D04, 0x2F0B0007, 
            0x82345030, 0x2F0B0007,
            0x82344DD0, 0x2B0B0004,
            0x824AB510, 0},
