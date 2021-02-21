@@ -744,32 +744,88 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     }
 
     if (module->title_id() == 0x584108A9) {
-      // Check if this is the Aug 25th 2007 GE build
-      auto* test_addr =
-          (xe::be<uint32_t>*)module->memory()->TranslateVirtual(0x8200336C);
-      if (*test_addr == 0x676f6c64) {
+
+      struct GEPatchOffsets {
+        uint32_t check_addr;
+        uint32_t check_value;
+
+        uint32_t crosshair_addr1;
+        uint32_t crosshair_patch1;
+        uint32_t crosshair_addr2;
+        uint32_t crosshair_patch2;
+
+        uint32_t returnarcade_addr1;
+        uint32_t returnarcade_patch1;
+        uint32_t returnarcade_addr2;
+        uint32_t returnarcade_patch2;
+        uint32_t returnarcade_addr3;
+        uint32_t returnarcade_patch3;
+
+        uint32_t blur_addr;
+        uint32_t debug_addr;
+      };
+
+      std::vector<GEPatchOffsets> supported_builds = {
+          // Nov 2007 Release build
+          {0x8200336C, 0x676f6c64, 
+           0x820A45D0, 0x4800003C, 
+           0x820A46D4, 0x4800003C, 
+           0x820F7750, 0x2F1E0007, 
+           0x820F7D04, 0x2F1A0007,
+           0x820F7780, 0x2B0A0003,
+           0x82188E70, 0x82189F28},
+
+          // Nov 2007 Debug build
+          {0x82005540, 0x676f6c64, 
+           0x822A2BFC, 0x480000B0, 
+           0x822A2F04, 0x480000B0, 
+           0x820F7750, 0x2F0B0007, 
+           0x82345030, 0x2F0B0007,
+           0x82344DD0, 0x2B0B0004,
+           0x824AB510, 0},
+      };
+
+      for (auto& build : supported_builds) {
+        auto* test_addr =
+            (xe::be<uint32_t>*)module->memory()->TranslateVirtual(build.check_addr);
+        if (*test_addr != build.check_value) {
+          continue;
+        }
+
         // Prevent game from overwriting crosshair/gun positions
-        patch_addr(0x820A45D0, 0x4800003C);
-        patch_addr(0x820A46D4, 0x4800003C);
+        if (build.crosshair_addr1) {
+          patch_addr(build.crosshair_addr1, build.crosshair_patch1);
+        }
+        if (build.crosshair_addr2) {
+          patch_addr(build.crosshair_addr2, build.crosshair_patch2);
+        }
 
         // Hide "return to arcade" menu option
-        patch_addr(0x820F7750, 0x2F1E0007);
-        patch_addr(0x820F7D04, 0x2F1A0007);
+        if (build.returnarcade_addr1) {
+          patch_addr(build.returnarcade_addr1, build.returnarcade_patch1);
+        }
+        if (build.returnarcade_addr2) {
+          patch_addr(build.returnarcade_addr2, build.returnarcade_patch2); 
+        }
         // Prevent "return to arcade" code from being executed
-        patch_addr(0x820F7780, 0x2B0A0003);
+        if (build.returnarcade_addr3) {
+          patch_addr(build.returnarcade_addr3, build.returnarcade_patch3);
+        }
 
-        if (cvars::ge_remove_blur) {
+        if (cvars::ge_remove_blur && build.blur_addr) {
           // Patch out N64 blur
           // Source:
           // https://github.com/xenia-canary/game-patches/blob/main/patches/584108A9.patch
 
-          patch_addr(0x82188E70, 0x60000000);
+          patch_addr(build.blur_addr, 0x60000000);
         }
 
-        if (cvars::ge_debug_menu) {
+        if (cvars::ge_debug_menu && build.debug_addr) {
           // Enable debug menu
-          patch_addr(0x82189F28, 0x2B0B0000);
+          patch_addr(build.debug_addr, 0x2B0B0000);
         }
+
+        break;
       }
     }
   }
