@@ -50,6 +50,7 @@ struct RareGameBuildAddrs {
   uint32_t game_pause_addr;
 
   uint32_t settings_addr;
+  uint32_t settings_bitflags_offset;
 
   uint32_t player_addr;  // addr to pointer of player data
 
@@ -66,48 +67,55 @@ struct RareGameBuildAddrs {
 };
 
 std::map<GoldeneyeGame::GameBuild, RareGameBuildAddrs> supported_builds = {
+    // GoldenEye Nov2007 build (aka Aug2007 build)
     {
       GoldeneyeGame::GameBuild::GoldenEye_Nov2007_Release,
-        {0x8200336C, 0x676f6c64, 0x8272B37C, 0x82F1E70C, 0x83088228, 0x82F1FA98,
+        {0x8200336C, 0x676f6c64, 0x8272B37C, 0x82F1E70C, 0x83088228, 0x298, 0x82F1FA98,
+        0x2E8, 0x80, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C,
+        0x11AC}
+    },
+    {
+      GoldeneyeGame::GameBuild::GoldenEye_Nov2007_Team,
+        {0x82003398, 0x676f6c64, 0x827DB384, 0x82FCE6CC, 0x831382D0, 0x2A0, 0x82FCFA98,
+        0x2E8, 0x80, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C,
+        0x11AC}
+    },
+    // TODO: unsure about 83A4EABC
+    {
+      GoldeneyeGame::GameBuild::GoldenEye_Nov2007_Debug,
+        {0x82005540, 0x676f6c64, 0x830C8564, 0x83A4EABC, 0x83BFC018, 0x2A0, 0x83A50298,
         0x2E8, 0x80, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C,
         0x11AC}
     },
 
-    // TODO: unsure about 83A4EABC
-    {
-      GoldeneyeGame::GameBuild::GoldenEye_Nov2007_Debug,
-        {0x82005540, 0x676f6c64, 0x830C8564, 0x83A4EABC, 0x83BFC018, 0x83A50298,
-        0x2E8, 0x80, 0x254, 0x264, 0x10A8, 0x10AC, 0x10BC, 0x10C0, 0x22C,
-        0x11AC}
-    },
     // PD: player_offset_disabled seems to be stored at 0x0
     // PD TODO: 0x104 almost seems like a good player_watch_status, but
     // unfortunately gets triggered when health bar appears...
     {
       GoldeneyeGame::GameBuild::PerfectDark_Devkit_33,
-        {0x825CBC59, 0x30303333, 0, 0, 0x82620E08, 0x826284C4, 0x1A4C, 0x0, 0x14C,
+        {0x825CBC59, 0x30303333, 0, 0, 0x82620E08, 0, 0x826284C4, 0x1A4C, 0x0, 0x14C,
           0x15C, 0x1690, 0x1694, 0xCFC, 0xD00, 0x128, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_52,
-        {0x825EC0E5, 0x30303532, 0, 0, 0x826419C0, 0x8264909C, 0x1A4C, 0x0, 0x14C,
+        {0x825EC0E5, 0x30303532, 0, 0, 0x826419C0, 0, 0x8264909C, 0x1A4C, 0x0, 0x14C,
           0x15C, 0x1690, 0x1694, 0xCFC, 0xD00, 0x128, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Devkit_102,
-        {0x825EC0E5, 0x30313032, 0, 0, 0x82641A80, 0x82649274, 0x1A4C, 0x0, 0x14C,
+        {0x825EC0E5, 0x30313032, 0, 0, 0x82641A80, 0, 0x82649274, 0x1A4C, 0x0, 0x14C,
           0x15C, 0x1690, 0x1694, 0xCFC, 0xD00, 0x128, 0}
     },
     // TODO: test these!
     /*
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_104,
-        {0x825EC0D5, 0x30313034, 0, 0, 0x82641A80, 0x82649264, 0x1A4C, 0x0, 0x14C,
+        {0x825EC0D5, 0x30313034, 0, 0, 0x82641A80, 0, 0x82649264, 0x1A4C, 0x0, 0x14C,
           0x15C, 0x1690, 0x1694, 0xCFC, 0xD00, 0x128, 0}
     },
     {
       GoldeneyeGame::GameBuild::PerfectDark_Release_107,
-        {0x825FC25D, 0x30313037, 0, 0, 0x8265A200, 0x826619E4, 0x1A4C, 0x0, 0x14C,
+        {0x825FC25D, 0x30313037, 0, 0, 0x8265A200, 0, 0x826619E4, 0x1A4C, 0x0, 0x14C,
           0x15C, 0x1690, 0x1694, 0xCFC, 0xD00, 0x128, 0}
     },*/
 };
@@ -211,7 +219,7 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
             game_build_ == GameBuild::GoldenEye_Nov2007_Team ||
             game_build_ == GameBuild::GoldenEye_Nov2007_Debug) {
           settings_ptr = kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(
-              *settings_ptr + 0x298);
+              *settings_ptr + game_addrs.settings_bitflags_offset);
           uint32_t settings = *settings_ptr;
 
           enum GESettingFlag {
