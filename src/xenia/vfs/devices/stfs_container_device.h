@@ -474,7 +474,7 @@ class StfsContainerDevice : public Device {
     kSingleFile = 0x4,
   };
 
-  const uint32_t kSTFSHashSpacing = 170;
+  const uint32_t kSTFSDataBlocksPerHashLevel[3] = {0xAA, 0x70E4, 0x4AF768};
 
   uint32_t ReadMagic(const std::wstring& path);
   bool ResolveFromFolder(const std::filesystem::path& path);
@@ -488,10 +488,22 @@ class StfsContainerDevice : public Device {
   void BlockToOffsetSVOD(size_t sector, size_t* address, size_t* file_index);
 
   Error ReadSTFS();
-  size_t BlockToOffsetSTFS(uint64_t block);
 
-  StfsHashEntry GetBlockHash(const uint8_t* map_ptr, uint32_t block_index,
-                             uint32_t table_offset);
+  uint64_t STFSDataBlockToBackingBlock(uint64_t block);
+  uint64_t STFSDataBlockToBackingHashBlock(uint64_t block, uint32_t level = 0);
+
+  size_t STFSBackingBlockToOffset(uint64_t backing_block);
+  size_t STFSDataBlockToOffset(uint64_t block);
+  size_t STFSDataBlockToBackingHashBlockOffset(uint64_t block,
+                                               uint32_t level = 0);
+
+  StfsHashEntry STFSGetLevelNHashEntry(const uint8_t* map_ptr,
+                                       uint32_t block_index, uint32_t level,
+                                       uint8_t* hash_in_out = nullptr,
+                                       bool secondary_block = false);
+
+  StfsHashEntry STFSGetLevel0HashEntry(const uint8_t* map_ptr,
+                                       uint32_t block_index);
 
   std::string name_;
   std::filesystem::path host_path_;
@@ -504,7 +516,14 @@ class StfsContainerDevice : public Device {
   std::unique_ptr<Entry> root_entry_;
   StfsHeader header_;
   SvodLayoutType svod_layout_;
-  uint32_t table_size_shift_;
+
+  uint32_t blocks_per_hash_table_ = 1;
+  uint64_t block_step_[2] = {0xAB, 0x718F};
+
+  // Any STFS hash tables that we read from will be cached here, since it's
+  // likely that they'll be needed again
+  std::map<size_t, StfsHashTable> cached_tables_;
+  std::vector<size_t> invalid_tables_;
 };
 
 }  // namespace vfs
