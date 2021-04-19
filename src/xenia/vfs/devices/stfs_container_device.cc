@@ -483,8 +483,7 @@ StfsContainerDevice::Error StfsContainerDevice::ReadSTFS() {
         break;
       }
       uint8_t name_length_flags = xe::load_and_swap<uint8_t>(p + 0x28);
-      // TODO(benvanik): use for allocation_size_?
-      // uint32_t allocated_block_count = load_uint24_le(p + 0x29);
+      uint32_t allocated_block_count = load_uint24_le(p + 0x2C);
       uint32_t start_block_index = load_uint24_le(p + 0x2F);
       uint16_t path_indicator = xe::load_and_swap<uint16_t>(p + 0x32);
       uint32_t file_size = xe::load_and_swap<uint32_t>(p + 0x34);
@@ -531,7 +530,7 @@ StfsContainerDevice::Error StfsContainerDevice::ReadSTFS() {
       if (entry->attributes() & X_FILE_ATTRIBUTE_NORMAL) {
         uint32_t block_index = start_block_index;
         size_t remaining_size = file_size;
-        while (remaining_size && block_index) {
+        while (remaining_size && block_index != 0xFFFFFF) {
           size_t block_size =
               std::min(static_cast<size_t>(kSectorSize), remaining_size);
           size_t offset = BlockToOffsetSTFS(block_index);
@@ -539,6 +538,22 @@ StfsContainerDevice::Error StfsContainerDevice::ReadSTFS() {
           remaining_size -= block_size;
           auto block_hash = GetBlockHash(data, block_index);
           block_index = block_hash->level0_next_block();
+        }
+
+        if (entry->block_list_.size() != allocated_block_count) {
+          // Some files like profile's PEC file sometimes give wrong
+          // allocated_block_count in the dir entry, so check against the
+          // allocation_size too
+          uint32_t expected_num_blocks =
+              uint32_t(entry->allocation_size_ / kSectorSize);
+          if (entry->block_list_.size() != expected_num_blocks) {
+            XELOGW(
+                "STFS failed to read correct block-chain for entry {}, read {} "
+                "blocks, expected {} or {}",
+                entry->name_, entry->block_list_.size(), expected_num_blocks,
+                allocated_block_count);
+            assert_always();
+          }
         }
       }
 
