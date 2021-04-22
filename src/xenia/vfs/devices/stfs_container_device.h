@@ -264,12 +264,14 @@ XEPACKEDSTRUCT(XContentMetadata, {
     char16_t description_ex_chars[3][128];
   };
 
-  std::u16string display_name(uint32_t lang_id) const {
-    lang_id--;
-    if (lang_id >= 12) {
+  std::u16string display_name(XLanguage language) const {
+    if (language >= XLanguage::kMaxLanguages) {
       assert_always();
-      lang_id = 0;  // no room for this lang, read from english slot..
+      // no room for this lang, read from english slot..
+      language = XLanguage::kEnglish;
     }
+
+    uint32_t lang_id = uint32_t(language) - 1;
 
     const be<uint16_t>* str = 0;
     if (lang_id >= 0 && lang_id < 9) {
@@ -279,18 +281,22 @@ XEPACKEDSTRUCT(XContentMetadata, {
     }
 
     if (!str) {
+      // Invalid language ID?
+      assert_always();
       return u"";
     }
 
     return load_and_swap<std::u16string>(str);
   }
 
-  std::u16string description(uint32_t lang_id) const {
-    lang_id--;
-    if (lang_id >= 12) {
+  std::u16string description(XLanguage language) const {
+    if (language >= XLanguage::kMaxLanguages) {
       assert_always();
-      lang_id = 0;  // no room for this lang, read from english slot..
+      // no room for this lang, read from english slot..
+      language = XLanguage::kEnglish;
     }
+
+    uint32_t lang_id = uint32_t(language) - 1;
 
     const be<uint16_t>* str = 0;
     if (lang_id >= 0 && lang_id < 9) {
@@ -300,6 +306,8 @@ XEPACKEDSTRUCT(XContentMetadata, {
     }
 
     if (!str) {
+      // Invalid language ID?
+      assert_always();
       return u"";
     }
 
@@ -314,12 +322,14 @@ XEPACKEDSTRUCT(XContentMetadata, {
     return load_and_swap<std::u16string>(title_name_raw);
   }
 
-  bool display_name(uint32_t lang_id, const std::u16string_view value) {
-    lang_id--;
-    if (lang_id >= 12) {
+  bool display_name(XLanguage language, const std::u16string_view value) {
+    if (language >= XLanguage::kMaxLanguages) {
       assert_always();
-      lang_id = 0;  // no room for this lang, store in english slot..
+      // no room for this lang, store in english slot..
+      language = XLanguage::kEnglish;
     }
+
+    uint32_t lang_id = uint32_t(language) - 1;
 
     char16_t* str = 0;
     if (lang_id >= 0 && lang_id < 9) {
@@ -329,6 +339,8 @@ XEPACKEDSTRUCT(XContentMetadata, {
     }
 
     if (!str) {
+      // Invalid language ID?
+      assert_always();
       return false;
     }
 
@@ -336,12 +348,14 @@ XEPACKEDSTRUCT(XContentMetadata, {
     return true;
   }
 
-  bool description(uint32_t lang_id, const std::u16string_view value) {
-    lang_id--;
-    if (lang_id >= 12) {
+  bool description(XLanguage language, const std::u16string_view value) {
+    if (language >= XLanguage::kMaxLanguages) {
       assert_always();
-      lang_id = 0;  // no room for this lang, store in english slot..
+      // no room for this lang, store in english slot..
+      language = XLanguage::kEnglish;
     }
+
+    uint32_t lang_id = uint32_t(language) - 1;
 
     char16_t* str = 0;
     if (lang_id >= 0 && lang_id < 9) {
@@ -351,6 +365,8 @@ XEPACKEDSTRUCT(XContentMetadata, {
     }
 
     if (!str) {
+      // Invalid language ID?
+      assert_always();
       return false;
     }
 

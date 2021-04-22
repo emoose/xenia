@@ -678,7 +678,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
           module->memory()->TranslateVirtual(resource_data), resource_size);
       if (db.is_valid()) {
         // TODO(gibbed): get title respective to user locale.
-        game_title_ = db.title(kernel::util::XdbfLocale::kEnglish);
+        game_title_ = db.title(XLanguage::kEnglish);
         if (game_title_.empty()) {
           // If English title is unavailable, get the title in default locale.
           game_title_ = db.title();
