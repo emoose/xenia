@@ -15,6 +15,7 @@
 
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/vfs/devices/host_path_device.h"
 #include "xenia/vfs/devices/stfs_container_entry.h"
 
 #if XE_PLATFORM_WIN32
@@ -24,6 +25,8 @@
 
 namespace xe {
 namespace vfs {
+
+std::string StfsContainerDevice::kDataPath = ".data";
 
 uint32_t load_uint24_be(const uint8_t* p) {
   return (static_cast<uint32_t>(p[0]) << 16) |
@@ -131,7 +134,7 @@ StfsContainerDevice::Error StfsContainerDevice::MapFiles() {
   // If the STFS package is multi-file, it is an SVOD system. We need to map
   // the files in the .data folder and can discard the header.
   auto data_fragment_path = host_path_;
-  data_fragment_path += ".data";
+  data_fragment_path += kDataPath;
   if (!std::filesystem::exists(data_fragment_path)) {
     XELOGE("STFS container is multi-file, but path {} does not exist.",
            xe::path_to_utf8(data_fragment_path));
@@ -169,6 +172,10 @@ StfsContainerDevice::Error StfsContainerDevice::MapFiles() {
 }
 
 void StfsContainerDevice::Dump(StringBuffer* string_buffer) {
+  if (mounted_folder_.get()) {
+    return mounted_folder_->Dump(string_buffer);
+  }
+
   auto global_lock = global_critical_region_.Acquire();
   root_entry_->Dump(string_buffer, 0);
 }
@@ -177,6 +184,10 @@ Entry* StfsContainerDevice::ResolvePath(const std::string_view path) {
   // The filesystem will have stripped our prefix off already, so the path will
   // be in the form:
   // some\PATH.foo
+  if (mounted_folder_.get()) {
+    return mounted_folder_->ResolvePath(path);
+  }
+
   XELOGFS("StfsContainerDevice::ResolvePath({})", path);
   return root_entry_->ResolvePath(path);
 }
@@ -463,105 +474,220 @@ void StfsContainerDevice::BlockToOffsetSVOD(size_t block, size_t* out_address,
 }
 
 StfsContainerDevice::Error StfsContainerDevice::ReadSTFS() {
-  auto data = mmap_.at(0)->data();
+  std::filesystem::path data_path = host_path_;
+  data_path += kDataPath;
 
-  auto root_entry = new StfsContainerEntry(this, nullptr, "", &mmap_);
-  root_entry->attributes_ = kFileAttributeDirectory;
-  root_entry_ = std::unique_ptr<Entry>(root_entry);
+  bool data_folder_exists = std::filesystem::is_directory(data_path);
 
-  std::vector<StfsContainerEntry*> all_entries;
+  // Read STFS filesystem if data_path doesn't exist
+  if (!data_folder_exists &&
+      mmap_total_size_ >
+          xe::round_up(header_.header.header_size, kSectorSize)) {
+    auto data = mmap_.at(0)->data();
 
-  // Load all listings.
-  auto& volume_descriptor = header_.metadata.stfs_volume_descriptor;
-  uint32_t table_block_index = volume_descriptor.file_table_block_number();
-  for (size_t n = 0; n < volume_descriptor.file_table_block_count; n++) {
-    const uint8_t* p = data + BlockToOffsetSTFS(table_block_index);
-    for (size_t m = 0; m < kSectorSize / 0x40; m++) {
-      const uint8_t* name_buffer = p;  // 0x28b
-      if (name_buffer[0] == 0) {
-        // Done.
+    auto root_entry = new StfsContainerEntry(this, nullptr, "", &mmap_);
+    root_entry->attributes_ = kFileAttributeDirectory;
+    root_entry_ = std::unique_ptr<Entry>(root_entry);
+
+    std::vector<StfsContainerEntry*> all_entries;
+
+    // Load all listings.
+    auto& volume_descriptor = header_.metadata.stfs_volume_descriptor;
+    uint32_t table_block_index = volume_descriptor.file_table_block_number();
+    for (size_t n = 0; n < volume_descriptor.file_table_block_count; n++) {
+      const uint8_t* p = data + BlockToOffsetSTFS(table_block_index);
+      for (size_t m = 0; m < kSectorSize / 0x40; m++) {
+        const uint8_t* name_buffer = p;  // 0x28b
+        if (name_buffer[0] == 0) {
+          // Done.
+          break;
+        }
+        uint8_t name_length_flags = xe::load_and_swap<uint8_t>(p + 0x28);
+        uint32_t allocated_block_count = load_uint24_le(p + 0x2C);
+        uint32_t start_block_index = load_uint24_le(p + 0x2F);
+        uint16_t path_indicator = xe::load_and_swap<uint16_t>(p + 0x32);
+        uint32_t file_size = xe::load_and_swap<uint32_t>(p + 0x34);
+
+        // both date and time parts of the timestamp are big endian
+        uint16_t update_date = xe::load_and_swap<uint16_t>(p + 0x38);
+        uint16_t update_time = xe::load_and_swap<uint16_t>(p + 0x3A);
+        uint32_t access_date = xe::load_and_swap<uint16_t>(p + 0x3C);
+        uint32_t access_time = xe::load_and_swap<uint16_t>(p + 0x3E);
+        p += 0x40;
+
+        StfsContainerEntry* parent_entry = nullptr;
+        if (path_indicator == 0xFFFF) {
+          parent_entry = root_entry;
+        } else {
+          parent_entry = all_entries[path_indicator];
+        }
+
+        std::string name(reinterpret_cast<const char*>(name_buffer),
+                         name_length_flags & 0x3F);
+        auto entry =
+            StfsContainerEntry::Create(this, parent_entry, name, &mmap_);
+
+        // bit 0x40 = consecutive blocks (not fragmented?)
+        if (name_length_flags & 0x80) {
+          entry->attributes_ = kFileAttributeDirectory;
+        } else {
+          entry->attributes_ = kFileAttributeNormal | kFileAttributeReadOnly;
+          entry->data_offset_ = BlockToOffsetSTFS(start_block_index);
+          entry->data_size_ = file_size;
+        }
+        entry->size_ = file_size;
+        entry->allocation_size_ = xe::round_up(file_size, kSectorSize);
+
+        entry->create_timestamp_ =
+            decode_fat_timestamp(update_date, update_time);
+        entry->access_timestamp_ =
+            decode_fat_timestamp(access_date, access_time);
+        entry->write_timestamp_ = entry->create_timestamp_;
+
+        all_entries.push_back(entry.get());
+
+        // Fill in all block records.
+        // It's easier to do this now and just look them up later, at the cost
+        // of some memory. Nasty chain walk.
+        // TODO(benvanik): optimize if flag 0x40 (consecutive) is set.
+        if (entry->attributes() & X_FILE_ATTRIBUTE_NORMAL) {
+          uint32_t block_index = start_block_index;
+          size_t remaining_size = file_size;
+          while (remaining_size && block_index != 0xFFFFFF) {
+            size_t block_size =
+                std::min(static_cast<size_t>(kSectorSize), remaining_size);
+            size_t offset = BlockToOffsetSTFS(block_index);
+            entry->block_list_.push_back({0, offset, block_size});
+            remaining_size -= block_size;
+            auto block_hash = GetBlockHash(data, block_index);
+            block_index = block_hash->level0_next_block();
+          }
+
+          // Check that the number of blocks retrieved from hash entries matches
+          // the block count read from the file entry
+          if (entry->block_list_.size() != allocated_block_count) {
+            XELOGW(
+                "STFS failed to read correct block-chain for entry {}, read {} "
+                "blocks, expected {}",
+                entry->name_, entry->block_list_.size(), allocated_block_count);
+            assert_always();
+          }
+        }
+
+        parent_entry->children_.emplace_back(std::move(entry));
+      }
+
+      auto block_hash = GetBlockHash(data, table_block_index);
+      table_block_index = block_hash->level0_next_block();
+      if (table_block_index == 0xFFFFFF) {
         break;
       }
-      uint8_t name_length_flags = xe::load_and_swap<uint8_t>(p + 0x28);
-      uint32_t allocated_block_count = load_uint24_le(p + 0x2C);
-      uint32_t start_block_index = load_uint24_le(p + 0x2F);
-      uint16_t path_indicator = xe::load_and_swap<uint16_t>(p + 0x32);
-      uint32_t file_size = xe::load_and_swap<uint32_t>(p + 0x34);
-
-      // both date and time parts of the timestamp are big endian
-      uint16_t update_date = xe::load_and_swap<uint16_t>(p + 0x38);
-      uint16_t update_time = xe::load_and_swap<uint16_t>(p + 0x3A);
-      uint32_t access_date = xe::load_and_swap<uint16_t>(p + 0x3C);
-      uint32_t access_time = xe::load_and_swap<uint16_t>(p + 0x3E);
-      p += 0x40;
-
-      StfsContainerEntry* parent_entry = nullptr;
-      if (path_indicator == 0xFFFF) {
-        parent_entry = root_entry;
-      } else {
-        parent_entry = all_entries[path_indicator];
-      }
-
-      std::string name(reinterpret_cast<const char*>(name_buffer),
-                       name_length_flags & 0x3F);
-      auto entry = StfsContainerEntry::Create(this, parent_entry, name, &mmap_);
-
-      // bit 0x40 = consecutive blocks (not fragmented?)
-      if (name_length_flags & 0x80) {
-        entry->attributes_ = kFileAttributeDirectory;
-      } else {
-        entry->attributes_ = kFileAttributeNormal | kFileAttributeReadOnly;
-        entry->data_offset_ = BlockToOffsetSTFS(start_block_index);
-        entry->data_size_ = file_size;
-      }
-      entry->size_ = file_size;
-      entry->allocation_size_ = xe::round_up(file_size, kSectorSize);
-
-      entry->create_timestamp_ = decode_fat_timestamp(update_date, update_time);
-      entry->access_timestamp_ = decode_fat_timestamp(access_date, access_time);
-      entry->write_timestamp_ = entry->create_timestamp_;
-
-      all_entries.push_back(entry.get());
-
-      // Fill in all block records.
-      // It's easier to do this now and just look them up later, at the cost
-      // of some memory. Nasty chain walk.
-      // TODO(benvanik): optimize if flag 0x40 (consecutive) is set.
-      if (entry->attributes() & X_FILE_ATTRIBUTE_NORMAL) {
-        uint32_t block_index = start_block_index;
-        size_t remaining_size = file_size;
-        while (remaining_size && block_index != 0xFFFFFF) {
-          size_t block_size =
-              std::min(static_cast<size_t>(kSectorSize), remaining_size);
-          size_t offset = BlockToOffsetSTFS(block_index);
-          entry->block_list_.push_back({0, offset, block_size});
-          remaining_size -= block_size;
-          auto block_hash = GetBlockHash(data, block_index);
-          block_index = block_hash->level0_next_block();
-        }
-
-        // Check that the number of blocks retrieved from hash entries matches
-        // the block count read from the file entry
-        if (entry->block_list_.size() != allocated_block_count) {
-          XELOGW(
-              "STFS failed to read correct block-chain for entry {}, read {} "
-              "blocks, expected {}",
-              entry->name_, entry->block_list_.size(), allocated_block_count);
-          assert_always();
-        }
-      }
-
-      parent_entry->children_.emplace_back(std::move(entry));
-    }
-
-    auto block_hash = GetBlockHash(data, table_block_index);
-    table_block_index = block_hash->level0_next_block();
-    if (table_block_index == 0xFFFFFF) {
-      break;
     }
   }
 
+  // If .data folder doesn't exist and this isn't a read-only package, extract
+  // the contents so files can be modified
+  if (!data_folder_exists &&
+      !header_.metadata.stfs_volume_descriptor.flags.read_only_format) {
+    if (!Extract(data_path)) {
+      return Error::kErrorReadError;
+    }
+  }
+
+  // Re-check if .data folder exists and mount it as HostPathDevice if so
+  if (std::filesystem::is_directory(data_path)) {
+    mounted_folder_ = std::move(
+        std::make_unique<HostPathDevice>(mount_path_, data_path, false));
+
+    return mounted_folder_->Initialize() ? Error::kSuccess
+                                         : Error::kErrorReadError;
+  }
+
   return Error::kSuccess;
+}
+
+bool StfsContainerDevice::Extract(const std::filesystem::path& dest_path) {
+  XELOGFS("Extracting package...");
+  XELOGFS("Source: {}", host_path_.string());
+  XELOGFS("Destination: {}", dest_path.string());
+
+  if (root_entry_ == nullptr) {
+    return false;
+  }
+
+  if (!std::filesystem::exists(dest_path)) {
+    std::filesystem::create_directories(dest_path);
+  }
+
+  if (!std::filesystem::is_directory(dest_path)) {
+    return false;  // failed to create folder, maybe exists as a file?
+  }
+
+  // Run through all the files, breadth-first style.
+  std::queue<vfs::Entry*> queue;
+  auto root = ResolvePath("/");
+  queue.push(root);
+
+  // Allocate a buffer when needed.
+  size_t buffer_size = 0;
+  uint8_t* buffer = nullptr;
+
+  while (!queue.empty()) {
+    auto entry = queue.front();
+    queue.pop();
+    for (auto& entry : entry->children()) {
+      queue.push(entry.get());
+    }
+
+    XELOGI("{}", entry->path());
+    auto dest_name = dest_path / xe::to_path(entry->path());
+    if (entry->attributes() & kFileAttributeDirectory) {
+      std::filesystem::create_directories(dest_name);
+      continue;
+    }
+
+    vfs::File* in_file = nullptr;
+    if (entry->Open(FileAccess::kFileReadData, &in_file) != X_STATUS_SUCCESS) {
+      continue;
+    }
+
+    auto file = xe::filesystem::OpenFile(dest_name, "wb");
+    if (!file) {
+      in_file->Destroy();
+      continue;
+    }
+
+    if (entry->can_map()) {
+      auto map = entry->OpenMapped(xe::MappedMemory::Mode::kRead);
+      fwrite(map->data(), map->size(), 1, file);
+      map->Close();
+    } else {
+      // Can't map the file into memory. Read it into a temporary buffer.
+      if (!buffer || entry->size() > buffer_size) {
+        // Resize the buffer.
+        if (buffer) {
+          delete[] buffer;
+        }
+
+        // Allocate a buffer large enough for the file
+        buffer_size = entry->size();
+        buffer = new uint8_t[buffer_size];
+      }
+
+      size_t bytes_read = 0;
+      in_file->ReadSync(buffer, entry->size(), 0, &bytes_read);
+      fwrite(buffer, bytes_read, 1, file);
+    }
+
+    fclose(file);
+    in_file->Destroy();
+  }
+
+  if (buffer) {
+    delete[] buffer;
+  }
+
+  return true;
 }
 
 size_t StfsContainerDevice::BlockToOffsetSTFS(uint64_t block_index) const {
