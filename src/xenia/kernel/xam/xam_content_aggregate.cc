@@ -62,14 +62,12 @@ void AddODDContentTest(object_ref<XStaticEnumerator> e, uint32_t content_type) {
 
         auto item = reinterpret_cast<XCONTENT_AGGREGATE_DATA*>(e->AppendItem());
         assert_not_null(item);
-        ContentAggregateData content_aggregate_data = {};
-        content_aggregate_data.device_id =
-            static_cast<uint32_t>(DummyDeviceId::ODD);
-        content_aggregate_data.content_type = content_type;
-        content_aggregate_data.display_name = to_utf16(content_entry->name());
-        content_aggregate_data.file_name = content_entry->name();
-        content_aggregate_data.title_id = title_id;
-        content_aggregate_data.Write(item);
+
+        item->device_id = static_cast<uint32_t>(DummyDeviceId::ODD);
+        item->content_type = content_type;
+        item->display_name(to_utf16(content_entry->name()));
+        item->file_name(content_entry->name());
+        item->title_id = title_id;
       }
     }
   }
@@ -105,13 +103,11 @@ dword_result_t XamContentAggregateCreateEnumerator(qword_t xuid,
     for (const auto& content_data : content_datas) {
       auto item = reinterpret_cast<XCONTENT_AGGREGATE_DATA*>(e->AppendItem());
       assert_not_null(item);
-      ContentAggregateData content_aggregate_data = {};
-      content_aggregate_data.device_id = content_data.device_id;
-      content_aggregate_data.content_type = content_data.content_type;
-      content_aggregate_data.display_name = content_data.display_name;
-      content_aggregate_data.file_name = content_data.file_name;
-      content_aggregate_data.title_id = 1u;
-      content_aggregate_data.Write(item);
+      item->device_id = content_data.device_id;
+      item->content_type = content_data.content_type;
+      item->display_name(content_data.display_name());
+      item->file_name(content_data.file_name());
+      item->title_id = 1u;
     }
   }
 
