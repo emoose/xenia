@@ -860,9 +860,7 @@ bool StfsContainerDevice::ResolveFromFolder(const std::filesystem::path& path) {
       auto path = current_file.path / current_file.name;
       auto magic = ReadMagic(path);
 
-      if (magic == XContentPackageType::kPackageTypeCon ||
-          magic == XContentPackageType::kPackageTypeLive ||
-          magic == XContentPackageType::kPackageTypePirs) {
+      if (IsStfsMagic(magic)) {
         host_path_ = current_file.path / current_file.name;
         XELOGI("STFS Package found: {}", xe::path_to_utf8(host_path_));
         return true;

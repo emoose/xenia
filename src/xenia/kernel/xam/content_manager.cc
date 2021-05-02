@@ -147,8 +147,23 @@ std::vector<XCONTENT_DATA> ContentManager::ListContent(
       // Files only.
       continue;
     }
+    if (file_info.total_size < sizeof(vfs::StfsHeader)) {
+      // Too small to be valid package
+      continue;
+    }
 
     auto file_path = file_info.path / file_info.name;
+
+    // Check file magic before reading with StfsContainerDevice...
+    auto file = xe::filesystem::OpenFile(file_path, "rb");
+    uint32_t magic = 0;
+    fread(&magic, sizeof(uint32_t), 1, file);
+    fclose(file);
+
+    if (!vfs::StfsContainerDevice::IsStfsMagic(xe::byte_swap(magic))) {
+      // Invalid file magic
+      continue;
+    }
 
     auto device = std::make_unique<vfs::StfsContainerDevice>(
         fmt::format("\\Device\\Content\\{0}\\", ++content_device_id_),
