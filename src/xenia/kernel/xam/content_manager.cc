@@ -14,8 +14,10 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/string.h"
+#include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
+#include "xenia/kernel/util/xdbf_utils.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/vfs/devices/host_path_device.h"
 #include "xenia/vfs/devices/stfs_container_device.h"
@@ -50,7 +52,8 @@ ContentPackage::ContentPackage(KernelState* kernel_state,
     header.metadata.content_type = data.content_type;
     header.metadata.display_name(XLanguage::kEnglish, data.display_name());
 
-    // TODO: set title_name/title_thumbnail from current title
+    header.metadata.title_name(
+        xe::to_utf16(kernel_state->emulator()->title_name()));
 
     auto& exe_module = kernel_state->GetExecutableModule();
     if (exe_module) {
@@ -59,6 +62,27 @@ ContentPackage::ContentPackage(KernelState* kernel_state,
       if (exec_info) {
         header.metadata.execution_info = *exec_info;
       }
+
+      // Set STFS title_thumbnail if game has one
+      auto title_id = fmt::format(
+          "{:08X}", uint32_t(header.metadata.execution_info.title_id));
+      uint32_t resource_data = 0;
+      uint32_t resource_size = 0;
+      if (XSUCCEEDED(exe_module->GetSection(title_id.c_str(), &resource_data,
+                                            &resource_size))) {
+        kernel::util::XdbfGameData db(
+            kernel_state->memory()->TranslateVirtual(resource_data),
+            resource_size);
+        if (db.is_valid()) {
+          auto icon_block = db.icon();
+          if (icon_block &&
+              icon_block.size <= vfs::XContentMetadata::kThumbLength) {
+            memcpy(header.metadata.title_thumbnail, icon_block.buffer,
+                   icon_block.size);
+            header.metadata.title_thumbnail_size = uint32_t(icon_block.size);
+          }
+        }
+      }
     }
 
     device->WriteHeader();
@@ -66,6 +90,7 @@ ContentPackage::ContentPackage(KernelState* kernel_state,
     // Create data folder for package files to be written into
     auto package_data = package_path;
     package_data += vfs::StfsContainerDevice::kDataPath;
+
     if (!std::filesystem::exists(package_data)) {
       if (!std::filesystem::create_directories(package_data)) {
         assert_always();
@@ -123,9 +148,11 @@ std::vector<XCONTENT_DATA> ContentManager::ListContent(
       continue;
     }
 
+    auto file_path = file_info.path / file_info.name;
+
     auto device = std::make_unique<vfs::StfsContainerDevice>(
         fmt::format("\\Device\\Content\\{0}\\", ++content_device_id_),
-        file_info.path);
+        file_path);
     device->Initialize();
 
     XCONTENT_DATA content_data;
