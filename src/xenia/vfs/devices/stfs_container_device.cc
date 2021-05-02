@@ -610,6 +610,9 @@ StfsContainerDevice::Error StfsContainerDevice::ReadSTFS() {
 
   // Re-check if .data folder exists and mount it as HostPathDevice if so
   if (std::filesystem::is_directory(data_path)) {
+    XELOGFS("Using data folder {} for package {}", data_path.string(),
+            host_path_.string());
+
     mounted_folder_ = std::move(
         std::make_unique<HostPathDevice>(mount_path_, data_path, false));
 
