@@ -96,7 +96,8 @@ dword_result_t XamContentCreateEnumerator(dword_t user_index, dword_t device_id,
   if (!device_info || device_info->device_id == DummyDeviceId::HDD) {
     // Get all content data.
     auto content_datas = kernel_state()->content_manager()->ListContent(
-        static_cast<uint32_t>(DummyDeviceId::HDD), content_type);
+        static_cast<uint32_t>(DummyDeviceId::HDD),
+        XContentType(uint32_t(content_type)));
     for (const auto& content_data : content_datas) {
       auto item = reinterpret_cast<XCONTENT_DATA*>(e->AppendItem());
       assert_not_null(item);
@@ -278,7 +279,7 @@ dword_result_t XamContentGetCreator(dword_t user_index,
 
   auto content_data = content_data_ptr.as<XCONTENT_DATA*>();
 
-  if (content_data->content_type == 1) {
+  if (content_data->content_type == XContentType::kSavedGame) {
     // User always creates saves.
     *is_creator_ptr = 1;
     if (creator_xuid_ptr) {

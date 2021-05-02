@@ -56,31 +56,9 @@ ContentManager::ContentManager(KernelState* kernel_state,
 ContentManager::~ContentManager() = default;
 
 std::filesystem::path ContentManager::ResolvePackageRoot(
-    uint32_t content_type) {
-  auto title_id = fmt::format("{:8X}", kernel_state_->title_id());
-
-  std::string type_name;
-  switch (content_type) {
-    case 1:
-      // Save games.
-      type_name = "00000001";
-      break;
-    case 2:
-      // DLC from the marketplace.
-      type_name = "00000002";
-      break;
-    case 3:
-      // Publisher content?
-      type_name = "00000003";
-      break;
-    case 0x000D0000:
-      // ???
-      type_name = "000D0000";
-      break;
-    default:
-      assert_unhandled_case(data.content_type);
-      return std::filesystem::path();
-  }
+    XContentType content_type) {
+  auto title_id = fmt::format("{:08X}", kernel_state_->title_id());
+  auto type_name = fmt::format("{:08X}", uint32_t(content_type));
 
   // Package root path:
   // content_root/title_id/type_name/
@@ -95,8 +73,8 @@ std::filesystem::path ContentManager::ResolvePackagePath(
   return package_root / xe::to_path(data.file_name());
 }
 
-std::vector<XCONTENT_DATA> ContentManager::ListContent(uint32_t device_id,
-                                                       uint32_t content_type) {
+std::vector<XCONTENT_DATA> ContentManager::ListContent(
+    uint32_t device_id, XContentType content_type) {
   std::vector<XCONTENT_DATA> result;
 
   // Search path:

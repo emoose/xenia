@@ -33,7 +33,7 @@ namespace xam {
 
 struct XCONTENT_DATA {
   be<uint32_t> device_id;
-  be<uint32_t> content_type;
+  be<XContentType> content_type;
   union {
     uint16_t display_name_raw[128];  // should be be<uint16_t>, but that stops
                                      // copy constructor being generated...
@@ -66,7 +66,7 @@ static_assert_size(XCONTENT_DATA, 308);
 
 struct XCONTENT_AGGREGATE_DATA {
   be<uint32_t> device_id;
-  be<uint32_t> content_type;
+  be<XContentType> content_type;
   union {
     uint16_t display_name_raw[128];  // should be be<uint16_t>, but that stops
                                      // copy constructor being generated...
@@ -118,7 +118,7 @@ class ContentManager {
   ~ContentManager();
 
   std::vector<XCONTENT_DATA> ListContent(uint32_t device_id,
-                                         uint32_t content_type);
+                                         XContentType content_type);
 
   std::unique_ptr<ContentPackage> ResolvePackage(
       const std::string_view root_name, const XCONTENT_DATA& data);
@@ -137,7 +137,7 @@ class ContentManager {
   std::filesystem::path ResolveGameUserContentPath();
 
  private:
-  std::filesystem::path ResolvePackageRoot(uint32_t content_type);
+  std::filesystem::path ResolvePackageRoot(XContentType content_type);
   std::filesystem::path ResolvePackagePath(const XCONTENT_DATA& data);
 
   KernelState* kernel_state_;
