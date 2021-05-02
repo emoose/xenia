@@ -50,6 +50,7 @@ class XexModule : public xe::cpu::Module {
     uint32_t image_flags;
     uint32_t export_table;
     uint32_t load_address;
+    uint32_t region;
     uint32_t page_descriptor_count;
     const xex2_page_descriptor* page_descriptors;
   };

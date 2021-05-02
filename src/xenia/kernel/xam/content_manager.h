@@ -35,8 +35,9 @@ struct XCONTENT_DATA {
   be<uint32_t> device_id;
   be<XContentType> content_type;
   union {
-    uint16_t display_name_raw[128];  // should be be<uint16_t>, but that stops
-                                     // copy constructor being generated...
+    // this should be be<uint16_t>, but that stops copy constructor being
+    // generated...
+    uint16_t display_name_raw[128];
     char16_t display_name_chars[128];
   };
   char file_name_raw[42];
@@ -51,12 +52,17 @@ struct XCONTENT_DATA {
   }
 
   bool display_name(const std::u16string_view value) {
+    // Some games (eg Goldeneye XBLA) require multiple null-terminators for it
+    // to read the string properly, blanking the array should take care of that
+
+    std::fill_n(display_name_chars, countof(display_name_chars), 0);
     string_util::copy_and_swap_truncating(display_name_chars, value,
                                           countof(display_name_chars));
     return true;
   }
 
   bool file_name(const std::string_view value) {
+    std::fill_n(file_name_raw, countof(file_name_raw), 0);
     string_util::copy_maybe_truncating<string_util::Safety::IKnowWhatIAmDoing>(
         file_name_raw, value, xe::countof(file_name_raw));
     return true;
@@ -68,8 +74,9 @@ struct XCONTENT_AGGREGATE_DATA {
   be<uint32_t> device_id;
   be<XContentType> content_type;
   union {
-    uint16_t display_name_raw[128];  // should be be<uint16_t>, but that stops
-                                     // copy constructor being generated...
+    // this should be be<uint16_t>, but that stops copy constructor being
+    // generated...
+    uint16_t display_name_raw[128];
     char16_t display_name_chars[128];
   };
   char file_name_raw[42];
@@ -85,12 +92,17 @@ struct XCONTENT_AGGREGATE_DATA {
   }
 
   bool display_name(const std::u16string_view value) {
+    // Some games (eg Goldeneye XBLA) require multiple null-terminators for it
+    // to read the string properly, blanking the array should take care of that
+
+    std::fill_n(display_name_chars, countof(display_name_chars), 0);
     string_util::copy_and_swap_truncating(display_name_chars, value,
                                           countof(display_name_chars));
     return true;
   }
 
   bool file_name(const std::string_view value) {
+    std::fill_n(file_name_raw, countof(file_name_raw), 0);
     string_util::copy_maybe_truncating<string_util::Safety::IKnowWhatIAmDoing>(
         file_name_raw, value, xe::countof(file_name_raw));
     return true;
