@@ -425,6 +425,12 @@ class StfsContainerDevice : public Device {
 
   bool WriteHeader() const;
 
+  static bool StfsContainerDevice::IsStfsMagic(const uint32_t magic) {
+    return magic == XContentPackageType::kPackageTypeCon ||
+           magic == XContentPackageType::kPackageTypeLive ||
+           magic == XContentPackageType::kPackageTypePirs;
+  };
+
  private:
   const uint32_t kSectorSize = 0x1000;
   const uint32_t kBlocksPerHashLevel[3] = {170, 28900, 4913000};
@@ -444,7 +450,8 @@ class StfsContainerDevice : public Device {
     kSingleFile = 0x4,
   };
 
-  uint32_t ReadMagic(const std::filesystem::path& path);
+  static uint32_t ReadMagic(const std::filesystem::path& path);
+
   bool ResolveFromFolder(const std::filesystem::path& path);
 
   Error MapFiles();
