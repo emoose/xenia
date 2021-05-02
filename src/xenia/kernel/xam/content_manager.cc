@@ -50,7 +50,8 @@ ContentPackage::ContentPackage(KernelState* kernel_state,
     header.set_defaults();
 
     header.metadata.content_type = data.content_type;
-    header.metadata.display_name(XLanguage::kEnglish, data.display_name());
+    header.metadata.display_name(kernel_state_->title_language(),
+                                 data.display_name());
 
     header.metadata.title_name(
         xe::to_utf16(kernel_state->emulator()->title_name()));
@@ -173,8 +174,8 @@ std::vector<XCONTENT_DATA> ContentManager::ListContent(
     XCONTENT_DATA content_data;
     content_data.device_id = device_id;
     content_data.content_type = device->header().metadata.content_type;
-    content_data.display_name(
-        device->header().metadata.display_name(XLanguage::kEnglish));
+    content_data.display_name(device->header().metadata.display_name(
+        kernel_state_->title_language()));
     content_data.file_name(path_to_utf8(file_info.name));
 
     result.emplace_back(std::move(content_data));

@@ -102,6 +102,35 @@ uint32_t KernelState::title_id() const {
   return 0;
 }
 
+XLanguage KernelState::title_language() const {
+  // Switch the language based on game region.
+  uint32_t game_region = XEX_REGION_NTSCU;
+
+  if (executable_module_) {
+    auto* xex_module = executable_module_->xex_module();
+    if (xex_module) {
+      auto* sec_info = xex_module->xex_security_info();
+      if (sec_info && sec_info->region) {
+        game_region = sec_info->region;
+      }
+    }
+  }
+
+  auto desired_language = XLanguage::kEnglish;
+  if (game_region & XEX_REGION_NTSCU) {
+    desired_language = XLanguage::kEnglish;
+  } else if (game_region & XEX_REGION_NTSCJ_JAPAN) {
+    desired_language = XLanguage::kJapanese;
+  } else if (game_region & XEX_REGION_NTSCJ_CHINA) {
+    desired_language = XLanguage::kSChinese;  // TODO: one of the chinese langs
+                                              // is unused, but which?
+  }
+
+  // TODO: Add more overrides?
+
+  return desired_language;
+}
+
 uint32_t KernelState::process_type() const {
   auto pib =
       memory_->TranslateVirtual<ProcessInfoBlock*>(process_info_block_address_);

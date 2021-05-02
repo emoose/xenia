@@ -877,6 +877,7 @@ void XexModule::ReadSecurityInfo() {
     security_info_.image_flags = xex1_sec_info->image_flags;
     security_info_.export_table = xex1_sec_info->export_table;
     security_info_.load_address = xex1_sec_info->load_address;
+    security_info_.region = xex1_sec_info->region;
     security_info_.page_descriptor_count = xex1_sec_info->page_descriptor_count;
     security_info_.page_descriptors = xex1_sec_info->page_descriptors;
   } else if (xex_format_ == kFormatXex2) {
@@ -890,6 +891,7 @@ void XexModule::ReadSecurityInfo() {
     security_info_.image_flags = xex2_sec_info->image_flags;
     security_info_.export_table = xex2_sec_info->export_table;
     security_info_.load_address = xex2_sec_info->load_address;
+    security_info_.region = xex2_sec_info->region;
     security_info_.page_descriptor_count = xex2_sec_info->page_descriptor_count;
     security_info_.page_descriptors = xex2_sec_info->page_descriptors;
   }

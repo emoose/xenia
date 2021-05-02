@@ -308,6 +308,7 @@ XEPACKEDSTRUCT(XContentMetadata, {
       return false;
     }
 
+    std::fill_n(str, 128, 0);
     string_util::copy_and_swap_truncating(str, value, 128);
     return true;
   }
@@ -334,17 +335,22 @@ XEPACKEDSTRUCT(XContentMetadata, {
       return false;
     }
 
+    std::fill_n(str, 128, 0);
     string_util::copy_and_swap_truncating(str, value, 128);
     return true;
   }
 
   bool publisher(const std::u16string_view value) {
+    std::fill_n(publisher_chars, countof(publisher_chars), 0);
+
     string_util::copy_and_swap_truncating(publisher_chars, value,
                                           countof(publisher_chars));
     return true;
   }
 
   bool title_name(const std::u16string_view value) {
+    std::fill_n(title_name_chars, countof(title_name_chars), 0);
+
     string_util::copy_and_swap_truncating(title_name_chars, value,
                                           countof(title_name_chars));
     return true;
