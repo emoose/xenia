@@ -25,6 +25,7 @@ namespace vfs {
 
 // https://free60project.github.io/wiki/STFS.html
 
+class HostPathDevice;
 class StfsContainerEntry;
 
 enum XContentPackageType : uint32_t {
@@ -377,6 +378,10 @@ static_assert_size(StfsHeader, 0x971A);
 
 class StfsContainerDevice : public Device {
  public:
+  // String added to SVOD package path to find data file folder
+  // (we also use it to store CON data as we can't write out STFS packages atm)
+  static std::string kDataPath;
+
   StfsContainerDevice(const std::string_view mount_path,
                       const std::filesystem::path& host_path);
   ~StfsContainerDevice() override;
@@ -406,6 +411,8 @@ class StfsContainerDevice : public Device {
     }
     return mmap_total_size_ - sizeof(StfsHeader);
   }
+
+  bool Extract(const std::filesystem::path& dest_path);
 
  private:
   const uint32_t kSectorSize = 0x1000;
@@ -461,6 +468,8 @@ class StfsContainerDevice : public Device {
   uint32_t block_step[2];
 
   std::unordered_map<size_t, StfsHashTable> cached_hash_tables_;
+
+  std::unique_ptr<HostPathDevice> mounted_folder_;
 };
 
 }  // namespace vfs
