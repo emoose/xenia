@@ -15,8 +15,10 @@
 #include "xenia/base/filesystem.h"
 #include "xenia/base/string.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/user_module.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/vfs/devices/host_path_device.h"
+#include "xenia/vfs/devices/stfs_container_device.h"
 
 namespace xe {
 namespace kernel {
@@ -31,14 +33,48 @@ static int content_device_id_ = 0;
 ContentPackage::ContentPackage(KernelState* kernel_state,
                                const std::string_view root_name,
                                const XCONTENT_DATA& data,
-                               const std::filesystem::path& package_path)
+                               const std::filesystem::path& package_path,
+                               bool create)
     : kernel_state_(kernel_state), root_name_(root_name) {
   device_path_ = fmt::format("\\Device\\Content\\{0}\\", ++content_device_id_);
 
   auto fs = kernel_state_->file_system();
   auto device =
-      std::make_unique<vfs::HostPathDevice>(device_path_, package_path, false);
+      std::make_unique<vfs::StfsContainerDevice>(device_path_, package_path);
+
+  if (create) {
+    // Creating new package, write out the basic STFS header before initializing
+    auto& header = device->header();
+    header.set_defaults();
+
+    header.metadata.content_type = data.content_type;
+    header.metadata.display_name(XLanguage::kEnglish, data.display_name());
+
+    // TODO: set title_name/title_thumbnail from current title
+
+    auto& exe_module = kernel_state->GetExecutableModule();
+    if (exe_module) {
+      xex2_opt_execution_info* exec_info = 0;
+      exe_module->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &exec_info);
+      if (exec_info) {
+        header.metadata.execution_info = *exec_info;
+      }
+    }
+
+    device->WriteHeader();
+
+    // Create data folder for package files to be written into
+    auto package_data = package_path;
+    package_data += vfs::StfsContainerDevice::kDataPath;
+    if (!std::filesystem::exists(package_data)) {
+      if (!std::filesystem::create_directories(package_data)) {
+        assert_always();
+      }
+    }
+  }
+
   device->Initialize();
+
   fs->RegisterDevice(std::move(device));
   fs->RegisterSymbolicLink(root_name_ + ":", device_path_);
 }
@@ -82,15 +118,23 @@ std::vector<XCONTENT_DATA> ContentManager::ListContent(
   auto package_root = ResolvePackageRoot(content_type);
   auto file_infos = xe::filesystem::ListFiles(package_root);
   for (const auto& file_info : file_infos) {
-    if (file_info.type != xe::filesystem::FileInfo::Type::kDirectory) {
-      // Directories only.
+    if (file_info.type == xe::filesystem::FileInfo::Type::kDirectory) {
+      // Files only.
       continue;
     }
+
+    auto device = std::make_unique<vfs::StfsContainerDevice>(
+        fmt::format("\\Device\\Content\\{0}\\", ++content_device_id_),
+        file_info.path);
+    device->Initialize();
+
     XCONTENT_DATA content_data;
     content_data.device_id = device_id;
-    content_data.content_type = content_type;
-    content_data.display_name(xe::path_to_utf16(file_info.name));
-    content_data.file_name(xe::path_to_utf8(file_info.name));
+    content_data.content_type = device->header().metadata.content_type;
+    content_data.display_name(
+        device->header().metadata.display_name(XLanguage::kEnglish));
+    content_data.file_name(path_to_utf8(file_info.name));
+
     result.emplace_back(std::move(content_data));
   }
 
@@ -98,16 +142,16 @@ std::vector<XCONTENT_DATA> ContentManager::ListContent(
 }
 
 std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
-    const std::string_view root_name, const XCONTENT_DATA& data) {
+    const std::string_view root_name, const XCONTENT_DATA& data, bool create) {
   auto package_path = ResolvePackagePath(data);
-  if (!std::filesystem::exists(package_path)) {
+  if (!std::filesystem::exists(package_path) && !create) {
     return nullptr;
   }
 
   auto global_lock = global_critical_region_.Acquire();
 
   auto package = std::make_unique<ContentPackage>(kernel_state_, root_name,
-                                                  data, package_path);
+                                                  data, package_path, create);
   return package;
 }
 
@@ -131,11 +175,14 @@ X_RESULT ContentManager::CreateContent(const std::string_view root_name,
     return X_ERROR_ALREADY_EXISTS;
   }
 
-  if (!std::filesystem::create_directories(package_path)) {
+  auto package_data = package_path;
+  package_data += vfs::StfsContainerDevice::kDataPath;
+
+  if (!std::filesystem::create_directories(package_data)) {
     return X_ERROR_ACCESS_DENIED;
   }
 
-  auto package = ResolvePackage(root_name, data);
+  auto package = ResolvePackage(root_name, data, true);
   assert_not_null(package);
 
   open_packages_.insert({string_key::create(root_name), package.release()});
@@ -186,6 +233,10 @@ X_RESULT ContentManager::GetContentThumbnail(const XCONTENT_DATA& data,
                                              std::vector<uint8_t>* buffer) {
   auto global_lock = global_critical_region_.Acquire();
   auto package_path = ResolvePackagePath(data);
+  package_path += vfs::StfsContainerDevice::kDataPath;
+
+  // TODO: set the STFS header thumbnail via this function
+
   auto thumb_path = package_path / kThumbnailFileName;
   if (std::filesystem::exists(thumb_path)) {
     auto file = xe::filesystem::OpenFile(thumb_path, "rb");
@@ -205,6 +256,10 @@ X_RESULT ContentManager::SetContentThumbnail(const XCONTENT_DATA& data,
                                              std::vector<uint8_t> buffer) {
   auto global_lock = global_critical_region_.Acquire();
   auto package_path = ResolvePackagePath(data);
+  package_path += vfs::StfsContainerDevice::kDataPath;
+
+  // TODO: retrieve the STFS header thumbnail via this function
+
   std::filesystem::create_directories(package_path);
   if (std::filesystem::exists(package_path)) {
     auto thumb_path = package_path / kThumbnailFileName;
@@ -221,7 +276,12 @@ X_RESULT ContentManager::DeleteContent(const XCONTENT_DATA& data) {
   auto global_lock = global_critical_region_.Acquire();
 
   auto package_path = ResolvePackagePath(data);
-  if (std::filesystem::remove_all(package_path) > 0) {
+  auto package_data = package_path;
+  package_data += vfs::StfsContainerDevice::kDataPath;
+
+  if (std::filesystem::remove_all(package_path) +
+          std::filesystem::remove_all(package_data) >
+      0) {
     return X_ERROR_SUCCESS;
   } else {
     return X_ERROR_FILE_NOT_FOUND;
