@@ -383,6 +383,13 @@ struct StfsHeader {
   XContentMetadata metadata;
   // TODO: title/system updates contain more data after XContentMetadata, seems
   // to affect header.header_size
+
+  void set_defaults() {
+    header.magic = XContentPackageType::kPackageTypeCon;
+    header.header_size = sizeof(StfsHeader);
+    metadata.stfs_volume_descriptor.descriptor_length =
+        sizeof(StfsVolumeDescriptor);
+  }
 };
 static_assert_size(StfsHeader, 0x971A);
 
@@ -422,7 +429,11 @@ class StfsContainerDevice : public Device {
     return mmap_total_size_ - sizeof(StfsHeader);
   }
 
+  StfsHeader& header() { return header_; }
+
   bool Extract(const std::filesystem::path& dest_path);
+
+  bool WriteHeader() const;
 
  private:
   const uint32_t kSectorSize = 0x1000;

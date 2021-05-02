@@ -104,6 +104,20 @@ bool StfsContainerDevice::Initialize() {
   }
 }
 
+bool StfsContainerDevice::WriteHeader() const {
+  // TODO: check if we have header currently mmaped and write there instead
+  auto header_file = xe::filesystem::OpenFile(host_path_, "wb");
+  if (!header_file) {
+    XELOGE("Failed to open STFS package {} for writing.",
+           xe::path_to_utf8(host_path_));
+    return false;
+  }
+  fwrite(&header_, sizeof(StfsHeader), 1, header_file);
+  fclose(header_file);
+
+  return true;
+}
+
 StfsContainerDevice::Error StfsContainerDevice::MapFiles() {
   // Map the file containing the STFS Header and read it.
   XELOGI("Mapping STFS Header file: {}", xe::path_to_utf8(host_path_));
