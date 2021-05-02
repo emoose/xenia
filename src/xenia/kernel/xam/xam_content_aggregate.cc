@@ -22,14 +22,15 @@ namespace xe {
 namespace kernel {
 namespace xam {
 
-void AddODDContentTest(object_ref<XStaticEnumerator> e, uint32_t content_type) {
+void AddODDContentTest(object_ref<XStaticEnumerator> e,
+                       XContentType content_type) {
   auto root_entry = kernel_state()->file_system()->ResolvePath(
       "game:\\Content\\0000000000000000");
   if (!root_entry) {
     return;
   }
 
-  auto content_type_path = fmt::format("{:08X}", content_type);
+  auto content_type_path = fmt::format("{:08X}", uint32_t(content_type));
 
   xe::filesystem::WildcardEngine title_find_engine;
   title_find_engine.SetRule("????????");
@@ -99,7 +100,7 @@ dword_result_t XamContentAggregateCreateEnumerator(qword_t xuid,
   if (!device_info || device_info->device_type == DeviceType::HDD) {
     // Get all content data.
     auto content_datas = kernel_state()->content_manager()->ListContent(
-        static_cast<uint32_t>(DummyDeviceId::HDD), content_type);
+        static_cast<uint32_t>(DummyDeviceId::HDD), XContentType(uint32_t(content_type)));
     for (const auto& content_data : content_datas) {
       auto item = reinterpret_cast<XCONTENT_AGGREGATE_DATA*>(e->AppendItem());
       assert_not_null(item);
@@ -112,7 +113,7 @@ dword_result_t XamContentAggregateCreateEnumerator(qword_t xuid,
   }
 
   if (!device_info || device_info->device_type == DeviceType::ODD) {
-    AddODDContentTest(e, content_type);
+    AddODDContentTest(e, XContentType(uint32_t(content_type)));
   }
 
   XELOGD("XamContentAggregateCreateEnumerator: added {} items to enumerator",
