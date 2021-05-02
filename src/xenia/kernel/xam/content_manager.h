@@ -35,11 +35,32 @@ struct XCONTENT_DATA {
   be<uint32_t> device_id;
   be<uint32_t> content_type;
   union {
-    be<uint16_t> display_name[128];
+    uint16_t display_name_raw[128];  // should be be<uint16_t>, but that stops
+                                     // copy constructor being generated...
     char16_t display_name_chars[128];
   };
-  char file_name[42];
+  char file_name_raw[42];
   uint8_t padding[2];
+
+  std::u16string display_name() const {
+    return load_and_swap<std::u16string>(display_name_raw);
+  }
+
+  std::string file_name() const {
+    return load_and_swap<std::string>(file_name_raw);
+  }
+
+  bool display_name(const std::u16string_view value) {
+    string_util::copy_and_swap_truncating(display_name_chars, value,
+                                          countof(display_name_chars));
+    return true;
+  }
+
+  bool file_name(const std::string_view value) {
+    string_util::copy_maybe_truncating<string_util::Safety::IKnowWhatIAmDoing>(
+        file_name_raw, value, xe::countof(file_name_raw));
+    return true;
+  }
 };
 static_assert_size(XCONTENT_DATA, 308);
 
@@ -47,76 +68,40 @@ struct XCONTENT_AGGREGATE_DATA {
   be<uint32_t> device_id;
   be<uint32_t> content_type;
   union {
-    be<uint16_t> display_name[128];
+    uint16_t display_name_raw[128];  // should be be<uint16_t>, but that stops
+                                     // copy constructor being generated...
     char16_t display_name_chars[128];
   };
-  char file_name[42];
+  char file_name_raw[42];
   uint8_t padding[2];
   be<uint32_t> title_id;
+
+  std::u16string display_name() const {
+    return load_and_swap<std::u16string>(display_name_raw);
+  }
+
+  std::string file_name() const {
+    return load_and_swap<std::string>(file_name_raw);
+  }
+
+  bool display_name(const std::u16string_view value) {
+    string_util::copy_and_swap_truncating(display_name_chars, value,
+                                          countof(display_name_chars));
+    return true;
+  }
+
+  bool file_name(const std::string_view value) {
+    string_util::copy_maybe_truncating<string_util::Safety::IKnowWhatIAmDoing>(
+        file_name_raw, value, xe::countof(file_name_raw));
+    return true;
+  }
 };
 static_assert_size(XCONTENT_AGGREGATE_DATA, 312);
-
-struct ContentData {
-  uint32_t device_id;
-  uint32_t content_type;
-  std::u16string display_name;
-  std::string file_name;
-
-  ContentData() = default;
-
-  explicit ContentData(const XCONTENT_DATA& data) {
-    device_id = data.device_id;
-    content_type = data.content_type;
-    display_name = xe::load_and_swap<std::u16string>(data.display_name);
-    file_name = xe::load_and_swap<std::string>(data.file_name);
-  }
-
-  void Write(XCONTENT_DATA* data) const {
-    data->device_id = device_id;
-    data->content_type = content_type;
-    xe::string_util::copy_and_swap_truncating(
-        data->display_name_chars, display_name,
-        xe::countof(data->display_name_chars));
-    xe::string_util::copy_maybe_truncating<
-        string_util::Safety::IKnowWhatIAmDoing>(data->file_name, file_name,
-                                                xe::countof(data->file_name));
-  }
-};
-
-struct ContentAggregateData {
-  uint32_t device_id;
-  uint32_t content_type;
-  std::u16string display_name;
-  std::string file_name;
-  uint32_t title_id;
-
-  ContentAggregateData() = default;
-
-  explicit ContentAggregateData(const XCONTENT_AGGREGATE_DATA& data) {
-    device_id = data.device_id;
-    content_type = data.content_type;
-    display_name = xe::load_and_swap<std::u16string>(data.display_name);
-    file_name = xe::load_and_swap<std::string>(data.file_name);
-    title_id = data.title_id;
-  }
-
-  void Write(XCONTENT_AGGREGATE_DATA* data) const {
-    data->device_id = device_id;
-    data->content_type = content_type;
-    xe::string_util::copy_and_swap_truncating(
-        data->display_name_chars, display_name,
-        xe::countof(data->display_name_chars));
-    xe::string_util::copy_maybe_truncating<
-        string_util::Safety::IKnowWhatIAmDoing>(data->file_name, file_name,
-                                                xe::countof(data->file_name));
-    data->title_id = title_id;
-  }
-};
 
 class ContentPackage {
  public:
   ContentPackage(KernelState* kernel_state, const std::string_view root_name,
-                 const ContentData& data,
+                 const XCONTENT_DATA& data,
                  const std::filesystem::path& package_path);
   ~ContentPackage();
 
@@ -132,28 +117,28 @@ class ContentManager {
                  const std::filesystem::path& root_path);
   ~ContentManager();
 
-  std::vector<ContentData> ListContent(uint32_t device_id,
-                                       uint32_t content_type);
+  std::vector<XCONTENT_DATA> ListContent(uint32_t device_id,
+                                         uint32_t content_type);
 
   std::unique_ptr<ContentPackage> ResolvePackage(
-      const std::string_view root_name, const ContentData& data);
+      const std::string_view root_name, const XCONTENT_DATA& data);
 
-  bool ContentExists(const ContentData& data);
+  bool ContentExists(const XCONTENT_DATA& data);
   X_RESULT CreateContent(const std::string_view root_name,
-                         const ContentData& data);
+                         const XCONTENT_DATA& data);
   X_RESULT OpenContent(const std::string_view root_name,
-                       const ContentData& data);
+                       const XCONTENT_DATA& data);
   X_RESULT CloseContent(const std::string_view root_name);
-  X_RESULT GetContentThumbnail(const ContentData& data,
+  X_RESULT GetContentThumbnail(const XCONTENT_DATA& data,
                                std::vector<uint8_t>* buffer);
-  X_RESULT SetContentThumbnail(const ContentData& data,
+  X_RESULT SetContentThumbnail(const XCONTENT_DATA& data,
                                std::vector<uint8_t> buffer);
-  X_RESULT DeleteContent(const ContentData& data);
+  X_RESULT DeleteContent(const XCONTENT_DATA& data);
   std::filesystem::path ResolveGameUserContentPath();
 
  private:
   std::filesystem::path ResolvePackageRoot(uint32_t content_type);
-  std::filesystem::path ResolvePackagePath(const ContentData& data);
+  std::filesystem::path ResolvePackagePath(const XCONTENT_DATA& data);
 
   KernelState* kernel_state_;
   std::filesystem::path root_path_;
