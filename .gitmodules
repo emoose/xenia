@@ -7,9 +7,6 @@
 [submodule "third_party/binutils-ppc-cygwin"]
 	path = third_party/binutils-ppc-cygwin
 	url = https://github.com/benvanik/binutils-ppc-cygwin.git
-[submodule "third_party/spirv-tools"]
-	path = third_party/spirv-tools
-	url = https://github.com/xenia-project/SPIRV-Tools.git
 [submodule "third_party/catch"]
 	path = third_party/catch
 	url = https://github.com/catchorg/Catch2.git
@@ -22,12 +19,6 @@
 [submodule "third_party/premake-export-compile-commands"]
 	path = third_party/premake-export-compile-commands
 	url = https://github.com/xenia-project/premake-export-compile-commands.git
-[submodule "third_party/spirv-headers"]
-	path = third_party/spirv-headers
-	url = https://github.com/KhronosGroup/SPIRV-Headers.git
-[submodule "third_party/volk"]
-	path = third_party/volk
-	url = https://github.com/zeux/volk.git
 [submodule "third_party/discord-rpc"]
 	path = third_party/discord-rpc
 	url = https://github.com/discordapp/discord-rpc.git
@@ -48,7 +39,7 @@
 	url = https://github.com/jarro2783/cxxopts.git
 [submodule "third_party/SDL2"]
 	path = third_party/SDL2
-	url = https://github.com/JoelLinn/SDL.git
+	url = https://github.com/libsdl-org/SDL.git
 [submodule "third_party/utfcpp"]
 	path = third_party/utfcpp
 	url = https://github.com/xenia-project/utfcpp.git
@@ -63,10 +54,7 @@
 	url = https://github.com/microsoft/DirectXShaderCompiler.git
 [submodule "third_party/premake-cmake"]
 	path = third_party/premake-cmake
-	url = https://github.com/Enhex/premake-cmake.git
-[submodule "third_party/premake-androidmk"]
-	path = third_party/premake-androidmk
-	url = https://github.com/Triang3l/premake-androidmk.git
+	url = https://github.com/JoelLinn/premake-cmake.git
 [submodule "third_party/date"]
 	path = third_party/date
 	url = https://github.com/HowardHinnant/date.git
@@ -76,3 +64,24 @@
 [submodule "third_party/FFmpeg"]
 	path = third_party/FFmpeg
 	url = https://github.com/xenia-project/FFmpeg.git
+[submodule "third_party/premake-androidndk"]
+	path = third_party/premake-androidndk
+	url = https://github.com/Triang3l/premake-androidndk.git
+[submodule "third_party/FidelityFX-CAS"]
+	path = third_party/FidelityFX-CAS
+	url = https://github.com/GPUOpen-Effects/FidelityFX-CAS.git
+[submodule "third_party/FidelityFX-FSR"]
+	path = third_party/FidelityFX-FSR
+	url = https://github.com/GPUOpen-Effects/FidelityFX-FSR.git
+[submodule "third_party/Vulkan-Headers"]
+	path = third_party/Vulkan-Headers
+	url = https://github.com/KhronosGroup/Vulkan-Headers.git
+[submodule "third_party/glslang"]
+	path = third_party/glslang
+	url = https://github.com/KhronosGroup/glslang.git
+[submodule "third_party/SPIRV-Tools"]
+	path = third_party/SPIRV-Tools
+	url = https://github.com/KhronosGroup/SPIRV-Tools.git
+[submodule "third_party/VulkanMemoryAllocator"]
+	path = third_party/VulkanMemoryAllocator
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git

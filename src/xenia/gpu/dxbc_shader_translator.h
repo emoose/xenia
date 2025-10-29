@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2018 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -15,10 +15,12 @@
 #include <string>
 #include <vector>
 
+#include "xenia/base/assert.h"
 #include "xenia/base/math.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/dxbc.h"
 #include "xenia/gpu/shader_translator.h"
+#include "xenia/gpu/ucode.h"
 #include "xenia/ui/graphics_provider.h"
 
 namespace xe {
@@ -49,15 +51,70 @@ class DxbcShaderTranslator : public ShaderTranslator {
                        bool bindless_resources_used, bool edram_rov_used,
                        bool gamma_render_target_as_srgb = false,
                        bool msaa_2x_supported = true,
-                       uint32_t draw_resolution_scale = 1,
+                       uint32_t draw_resolution_scale_x = 1,
+                       uint32_t draw_resolution_scale_y = 1,
                        bool force_emit_source_map = false);
   ~DxbcShaderTranslator() override;
+
+  // Stage linkage ordering and rules (must be respected not only within the
+  // DxbcShaderTranslator, but also by everything else between the VS and the
+  // PS, such as geometry shaders for primitive types, and built-in pixel
+  // shaders for processing the fragment depth when there's no guest pixel
+  // shader):
+  //
+  // Note that VS means the guest VS here - can be VS or DS on the host. RS
+  // means the fixed-function rasterizer.
+  //
+  // The beginning of the parameters must match between the output of the
+  // producing stage and the input of the consuming stage, while the tail can be
+  // stage-specific or cut off.
+  //
+  // - Interpolators (TEXCOORD) - VS > GS > RS > PS, used interpolators are all
+  //   unconditionally referenced in all these stages.
+  // - Point coordinates (XESPRITETEXCOORD) - GS > RS > PS, must be present in
+  //   none or in all, if drawing points, and PsParamGen is used.
+  // - Position (SV_Position) - VS > GS > RS > PS, used in PS if actually needed
+  //   for something (PsParamGen, alpha to coverage when oC0 is written, depth
+  //   conversion, ROV render backend), the presence in PS depends on the usage
+  //   within the PS, not on linkage, therefore it's the last in PS so it can be
+  //   dropped from PS without effect on linkage.
+  // - Clip distances (SV_ClipDistance) - VS > GS > RS.
+  // - Cull distances (SV_CullDistance) - VS > RS or VS > GS.
+  // - Vertex kill AND operator (SV_CullDistance) - VS > RS or VS > GS.
+  // - Point size (XEPSIZE) - VS > GS.
+  //
+  // Therefore, for the direct VS > PS path, the parameters may be the
+  // following:
+  // - Shared between VS and PS:
+  //   - Interpolators (TEXCOORD).
+  //   - Position (SV_Position).
+  // - VS output only:
+  //   - Clip distances (SV_ClipDistance).
+  //   - Cull distances (SV_CullDistance).
+  //   - Vertex kill AND operator (SV_CullDistance).
+  //
+  // When a GS is also used, the path between the VS and the GS is:
+  // - Shared between VS and GS:
+  //   - Interpolators (TEXCOORD).
+  //   - Position (SV_Position).
+  //   - Clip distances (SV_ClipDistance).
+  //   - Cull distances (SV_CullDistance).
+  //   - Vertex kill AND operator (SV_CullDistance).
+  //   - Point size (XEPSIZE).
+  //
+  // Then, between GS and PS, it's:
+  // - Shared between GS and PS:
+  //   - Interpolators (TEXCOORD).
+  //   - Point coordinates (XESPRITETEXCOORD).
+  //   - Position (SV_Position).
+  // - GS output only:
+  //   - Clip distances (SV_ClipDistance).
 
   union Modification {
     // If anything in this is structure is changed in a way not compatible with
     // the previous layout, invalidate the pipeline storages by increasing this
     // version number (0xYYYYMMDD)!
-    static constexpr uint32_t kVersion = 0x20210425;
+    static constexpr uint32_t kVersion = 0x20220720;
 
     enum class DepthStencilMode : uint32_t {
       kNoModifiers,
@@ -85,22 +142,57 @@ class DxbcShaderTranslator : public ShaderTranslator {
       kFloat24Rounding,
     };
 
+    uint64_t value;
     struct VertexShaderModification {
+      // uint32_t 0.
+      // Interpolators written by the vertex shader and needed by the pixel
+      // shader.
+      uint32_t interpolator_mask : xenos::kMaxInterpolators;
+      uint32_t user_clip_plane_count : 3;
+      uint32_t user_clip_plane_cull : 1;
+      // Whether vertex killing with the "and" operator is used, and one more
+      // SV_CullDistance needs to be written.
+      uint32_t vertex_kill_and : 1;
+      uint32_t output_point_size : 1;
       // Dynamically indexable register count from SQ_PROGRAM_CNTL.
       uint32_t dynamic_addressable_register_count : 8;
+      uint32_t : 2;
+      // uint32_t 1.
       // Pipeline stage and input configuration.
       Shader::HostVertexShaderType host_vertex_shader_type
           : Shader::kHostVertexShaderTypeBitCount;
     } vertex;
     struct PixelShaderModification {
+      // uint32_t 0.
+      // Interpolators written by the vertex shader and needed by the pixel
+      // shader.
+      uint32_t interpolator_mask : xenos::kMaxInterpolators;
+      uint32_t interpolators_centroid : xenos::kMaxInterpolators;
+      // uint32_t 1.
       // Dynamically indexable register count from SQ_PROGRAM_CNTL.
+      uint32_t param_gen_enable : 1;
+      uint32_t param_gen_interpolator : 4;
+      // If param_gen_enable is set, this must be set for point primitives, and
+      // must not be set for other primitive types - enables the point sprite
+      // coordinates input, and also effects the flag bits in PsParamGen.
+      uint32_t param_gen_point : 1;
       uint32_t dynamic_addressable_register_count : 8;
       // Non-ROV - depth / stencil output mode.
       DepthStencilMode depth_stencil_mode : 2;
     } pixel;
-    uint64_t value = 0;
 
-    Modification(uint64_t modification_value = 0) : value(modification_value) {}
+    explicit Modification(uint64_t modification_value = 0)
+        : value(modification_value) {
+      static_assert_size(*this, sizeof(value));
+    }
+
+    uint32_t GetVertexClipDistanceCount() const {
+      return vertex.user_clip_plane_cull ? 0 : vertex.user_clip_plane_count;
+    }
+    uint32_t GetVertexCullDistanceCount() const {
+      return (vertex.user_clip_plane_cull ? vertex.user_clip_plane_count : 0) +
+             vertex.vertex_kill_and;
+    }
   };
 
   // Constant buffer bindings in space 0.
@@ -118,14 +210,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
     kSysFlag_XYDividedByW_Shift,
     kSysFlag_ZDividedByW_Shift,
     kSysFlag_WNotReciprocal_Shift,
-    kSysFlag_UserClipPlane0_Shift,
-    kSysFlag_UserClipPlane1_Shift,
-    kSysFlag_UserClipPlane2_Shift,
-    kSysFlag_UserClipPlane3_Shift,
-    kSysFlag_UserClipPlane4_Shift,
-    kSysFlag_UserClipPlane5_Shift,
-    kSysFlag_KillIfAnyVertexKilled_Shift,
     kSysFlag_PrimitivePolygonal_Shift,
+    kSysFlag_PrimitiveLine_Shift,
     kSysFlag_DepthFloat24_Shift,
     kSysFlag_AlphaPassIfLess_Shift,
     kSysFlag_AlphaPassIfEqual_Shift,
@@ -161,14 +247,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
     kSysFlag_XYDividedByW = 1u << kSysFlag_XYDividedByW_Shift,
     kSysFlag_ZDividedByW = 1u << kSysFlag_ZDividedByW_Shift,
     kSysFlag_WNotReciprocal = 1u << kSysFlag_WNotReciprocal_Shift,
-    kSysFlag_UserClipPlane0 = 1u << kSysFlag_UserClipPlane0_Shift,
-    kSysFlag_UserClipPlane1 = 1u << kSysFlag_UserClipPlane1_Shift,
-    kSysFlag_UserClipPlane2 = 1u << kSysFlag_UserClipPlane2_Shift,
-    kSysFlag_UserClipPlane3 = 1u << kSysFlag_UserClipPlane3_Shift,
-    kSysFlag_UserClipPlane4 = 1u << kSysFlag_UserClipPlane4_Shift,
-    kSysFlag_UserClipPlane5 = 1u << kSysFlag_UserClipPlane5_Shift,
-    kSysFlag_KillIfAnyVertexKilled = 1u << kSysFlag_KillIfAnyVertexKilled_Shift,
     kSysFlag_PrimitivePolygonal = 1u << kSysFlag_PrimitivePolygonal_Shift,
+    kSysFlag_PrimitiveLine = 1u << kSysFlag_PrimitiveLine_Shift,
     kSysFlag_DepthFloat24 = 1u << kSysFlag_DepthFloat24_Shift,
     kSysFlag_AlphaPassIfLess = 1u << kSysFlag_AlphaPassIfLess_Shift,
     kSysFlag_AlphaPassIfEqual = 1u << kSysFlag_AlphaPassIfEqual_Shift,
@@ -188,21 +268,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
   };
   static_assert(kSysFlag_Count <= 32, "Too many flags in the system constants");
 
-  // Appended to the format in the format constant.
-  enum : uint32_t {
-    // Starting from bit 4 because the format itself needs 4 bits.
-    kRTFormatFlag_64bpp_Shift = 4,
-    // Requires clamping of blending sources and factors.
-    kRTFormatFlag_FixedPointColor_Shift,
-    kRTFormatFlag_FixedPointAlpha_Shift,
-
-    kRTFormatFlag_64bpp = 1u << kRTFormatFlag_64bpp_Shift,
-    kRTFormatFlag_FixedPointColor = 1u << kRTFormatFlag_FixedPointColor_Shift,
-    kRTFormatFlag_FixedPointAlpha = 1u << kRTFormatFlag_FixedPointAlpha_Shift,
-  };
-
   // IF SYSTEM CONSTANTS ARE CHANGED OR ADDED, THE FOLLOWING MUST BE UPDATED:
-  // - kSysConst enum (indices, registers and first components).
+  // - SystemConstants::Index enum.
   // - system_constant_rdef_.
   // - d3d12/shaders/xenos_draw.hlsli (for geometry shaders).
   struct SystemConstants {
@@ -217,20 +284,27 @@ class DxbcShaderTranslator : public ShaderTranslator {
     uint32_t line_loop_closing_index;
 
     xenos::Endian vertex_index_endian;
-    int32_t vertex_base_index;
-    float point_size[2];
-
-    float point_size_min_max[2];
-    // Screen point size * 2 (but not supersampled) -> size in NDC.
-    float point_screen_to_ndc[2];
+    uint32_t vertex_index_offset;
+    union {
+      struct {
+        uint32_t vertex_index_min;
+        uint32_t vertex_index_max;
+      };
+      uint32_t vertex_index_min_max[2];
+    };
 
     float user_clip_planes[6][4];
 
     float ndc_scale[3];
-    uint32_t interpolator_sampling_pattern;
+    float point_vertex_diameter_min;
 
     float ndc_offset[3];
-    uint32_t ps_param_gen;
+    float point_vertex_diameter_max;
+
+    float point_constant_diameter[2];
+    // Diameter in guest screen coordinates > radius (0.5 * diameter) in the NDC
+    // for the host viewport.
+    float point_screen_diameter_to_ndc_radius[2];
 
     // Each byte contains post-swizzle TextureSign values for each of the needed
     // components of each of the 32 used texture fetch constants.
@@ -244,20 +318,15 @@ class DxbcShaderTranslator : public ShaderTranslator {
     uint32_t sample_count_log2[2];
     float alpha_test_reference;
 
-    float color_exp_bias[4];
-
     // If alpha to mask is disabled, the entire alpha_to_mask value must be 0.
     // If alpha to mask is enabled, bits 0:7 are sample offsets, and bit 8 must
     // be 1.
     uint32_t alpha_to_mask;
-    uint32_t edram_pitch_tiles;
-    union {
-      struct {
-        float edram_depth_range_scale;
-        float edram_depth_range_offset;
-      };
-      float edram_depth_range[2];
-    };
+    uint32_t edram_32bpp_tile_pitch_dwords_scaled;
+    uint32_t edram_depth_base_dwords_scaled;
+    uint32_t padding_edram_depth_base_dwords_scaled;
+
+    float color_exp_bias[4];
 
     union {
       struct {
@@ -273,9 +342,6 @@ class DxbcShaderTranslator : public ShaderTranslator {
       };
       float edram_poly_offset_back[2];
     };
-
-    uint32_t edram_depth_base_dwords;
-    uint32_t padding_edram_depth_base_dwords[3];
 
     // In stencil function/operations (they match the layout of the
     // function/operations in RB_DEPTHCONTROL):
@@ -305,7 +371,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
 
     uint32_t edram_rt_base_dwords_scaled[4];
 
-    // RT format combined with kRTFormatFlags.
+    // RT format combined with RenderTargetCache::kPSIColorFormatFlag values
+    // (pass via RenderTargetCache::AddPSIColorFormatFlags).
     uint32_t edram_rt_format_flags[4];
 
     // Format info - values to clamp the color to before blending or storing.
@@ -326,6 +393,64 @@ class DxbcShaderTranslator : public ShaderTranslator {
 
     // The constant blend factor for the respective modes.
     float edram_blend_constant[4];
+
+   private:
+    friend class DxbcShaderTranslator;
+
+    enum class Index : uint32_t {
+      kFlags,
+      kTessellationFactorRange,
+      kLineLoopClosingIndex,
+
+      kVertexIndexEndian,
+      kVertexIndexOffset,
+      kVertexIndexMinMax,
+
+      kUserClipPlanes,
+
+      kNDCScale,
+      kPointVertexDiameterMin,
+
+      kNDCOffset,
+      kPointVertexDiameterMax,
+
+      kPointConstantDiameter,
+      kPointScreenDiameterToNDCRadius,
+
+      kTextureSwizzledSigns,
+
+      kTexturesResolved,
+      kSampleCountLog2,
+      kAlphaTestReference,
+
+      kAlphaToMask,
+      kEdram32bppTilePitchDwordsScaled,
+      kEdramDepthBaseDwordsScaled,
+
+      kColorExpBias,
+
+      kEdramPolyOffsetFront,
+      kEdramPolyOffsetBack,
+
+      kEdramStencil,
+
+      kEdramRTBaseDwordsScaled,
+
+      kEdramRTFormatFlags,
+
+      kEdramRTClamp,
+
+      kEdramRTKeepMask,
+
+      kEdramRTBlendFactorsOps,
+
+      kEdramBlendConstant,
+
+      kCount,
+    };
+    static_assert(
+        uint32_t(Index::kCount) <= 64,
+        "Too many system constants, can't use uint64_t for usage bits");
   };
 
   // Shader resource view binding spaces.
@@ -358,7 +483,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
     // descriptor handling simplicity.
     xenos::FetchOpDimension dimension;
     bool is_signed;
-    std::string name;
+    std::string bindful_name;
   };
 
   // Arbitrary limit - there can't be more than 2048 in a shader-visible
@@ -379,7 +504,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
     xenos::TextureFilter min_filter;
     xenos::TextureFilter mip_filter;
     xenos::AnisoFilter aniso_filter;
-    std::string name;
+    std::string bindful_name;
   };
 
   // Unordered access view bindings in space 0.
@@ -387,40 +512,6 @@ class DxbcShaderTranslator : public ShaderTranslator {
     kSharedMemory,
     kEdram,
   };
-
-  // Returns the format with internal flags for passing via the
-  // edram_rt_format_flags system constant.
-  static constexpr uint32_t ROV_AddColorFormatFlags(
-      xenos::ColorRenderTargetFormat format) {
-    uint32_t format_flags = uint32_t(format);
-    if (format == xenos::ColorRenderTargetFormat::k_16_16_16_16 ||
-        format == xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT ||
-        format == xenos::ColorRenderTargetFormat::k_32_32_FLOAT) {
-      format_flags |= kRTFormatFlag_64bpp;
-    }
-    if (format == xenos::ColorRenderTargetFormat::k_8_8_8_8 ||
-        format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA ||
-        format == xenos::ColorRenderTargetFormat::k_2_10_10_10 ||
-        format == xenos::ColorRenderTargetFormat::k_16_16 ||
-        format == xenos::ColorRenderTargetFormat::k_16_16_16_16 ||
-        format == xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10) {
-      format_flags |=
-          kRTFormatFlag_FixedPointColor | kRTFormatFlag_FixedPointAlpha;
-    } else if (format == xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT ||
-               format == xenos::ColorRenderTargetFormat::
-                             k_2_10_10_10_FLOAT_AS_16_16_16_16) {
-      format_flags |= kRTFormatFlag_FixedPointAlpha;
-    }
-    return format_flags;
-  }
-  // Returns the bits that need to be added to the RT flags constant - needs to
-  // be done externally, not in SetColorFormatConstants, because the flags
-  // contain other state.
-  static void ROV_GetColorFormatSystemConstants(
-      xenos::ColorRenderTargetFormat format, uint32_t write_mask,
-      float& clamp_rgb_low, float& clamp_alpha_low, float& clamp_rgb_high,
-      float& clamp_alpha_high, uint32_t& keep_mask_low,
-      uint32_t& keep_mask_high);
 
   uint64_t GetDefaultVertexShaderModification(
       uint32_t dynamic_addressable_register_count,
@@ -462,13 +553,14 @@ class DxbcShaderTranslator : public ShaderTranslator {
                            uint32_t temp2_temp_component);
   // Converts the depth value externally clamped to the representable [0, 2)
   // range to 20e4 floating point, with zeros in bits 24:31, rounding to the
-  // nearest even. Source and destination may be the same, temporary must be
-  // different than both. If remap_from_0_to_0_5 is true, it's assumed that
-  // 0...1 is pre-remapped to 0...0.5 on the input.
+  // nearest even or towards zero. Source and destination may be the same,
+  // temporary must be different than both. If remap_from_0_to_0_5 is true, it's
+  // assumed that 0...1 is pre-remapped to 0...0.5 in the input.
   static void PreClampedDepthTo20e4(
       dxbc::Assembler& a, uint32_t f24_temp, uint32_t f24_temp_component,
       uint32_t f32_temp, uint32_t f32_temp_component, uint32_t temp_temp,
-      uint32_t temp_temp_component, bool remap_from_0_to_0_5);
+      uint32_t temp_temp_component, bool round_to_nearest_even,
+      bool remap_from_0_to_0_5);
   // Converts the 20e4 number in bits [f24_shift, f24_shift + 10) to a 32-bit
   // float. Two temporaries must be different, but one can be the same as the
   // source. The destination may be anything writable. If remap_to_0_to_0_5 is
@@ -498,206 +590,54 @@ class DxbcShaderTranslator : public ShaderTranslator {
   void ProcessLoopEndInstruction(
       const ParsedLoopEndInstruction& instr) override;
   void ProcessJumpInstruction(const ParsedJumpInstruction& instr) override;
-  void ProcessAllocInstruction(const ParsedAllocInstruction& instr) override;
+  void ProcessAllocInstruction(const ParsedAllocInstruction& instr,
+                               uint8_t export_eM) override;
 
   void ProcessVertexFetchInstruction(
       const ParsedVertexFetchInstruction& instr) override;
   void ProcessTextureFetchInstruction(
       const ParsedTextureFetchInstruction& instr) override;
-  void ProcessAluInstruction(const ParsedAluInstruction& instr) override;
+  void ProcessAluInstruction(
+      const ParsedAluInstruction& instr,
+      uint8_t memexport_eM_potentially_written_before) override;
 
  private:
-  enum : uint32_t {
-    // Indices.
+  // IF ANY OF THESE ARE CHANGED, WriteInputSignature and WriteOutputSignature
+  // MUST BE UPDATED!
+  static constexpr uint32_t kInRegisterVSVertexIndex = 0;
+  static constexpr uint32_t kInRegisterDSControlPointIndex = 0;
 
-    kSysConst_Flags_Index,
-    kSysConst_TessellationFactorRange_Index,
-    kSysConst_LineLoopClosingIndex_Index,
-
-    kSysConst_VertexIndexEndian_Index,
-    kSysConst_VertexBaseIndex_Index,
-    kSysConst_PointSize_Index,
-
-    kSysConst_PointSizeMinMax_Index,
-    kSysConst_PointScreenToNDC_Index,
-
-    kSysConst_UserClipPlanes_Index,
-
-    kSysConst_NDCScale_Index,
-    kSysConst_InterpolatorSamplingPattern_Index,
-
-    kSysConst_NDCOffset_Index,
-    kSysConst_PSParamGen_Index,
-
-    kSysConst_TextureSwizzledSigns_Index,
-
-    kSysConst_TexturesResolved_Index,
-    kSysConst_SampleCountLog2_Index,
-    kSysConst_AlphaTestReference_Index,
-
-    kSysConst_ColorExpBias_Index,
-
-    kSysConst_AlphaToMask_Index,
-    kSysConst_EdramPitchTiles_Index,
-    kSysConst_EdramDepthRange_Index,
-
-    kSysConst_EdramPolyOffsetFront_Index,
-    kSysConst_EdramPolyOffsetBack_Index,
-
-    kSysConst_EdramDepthBaseDwords_Index,
-
-    kSysConst_EdramStencil_Index,
-
-    kSysConst_EdramRTBaseDwordsScaled_Index,
-
-    kSysConst_EdramRTFormatFlags_Index,
-
-    kSysConst_EdramRTClamp_Index,
-
-    kSysConst_EdramRTKeepMask_Index,
-
-    kSysConst_EdramRTBlendFactorsOps_Index,
-
-    kSysConst_EdramBlendConstant_Index,
-
-    kSysConst_Count,
-
-    // Vectors.
-
-    kSysConst_Flags_Vec = 0,
-    kSysConst_Flags_Comp = 0,
-    kSysConst_TessellationFactorRange_Vec = kSysConst_Flags_Vec,
-    kSysConst_TessellationFactorRange_Comp = 1,
-    kSysConst_LineLoopClosingIndex_Vec = kSysConst_Flags_Vec,
-    kSysConst_LineLoopClosingIndex_Comp = 3,
-
-    kSysConst_VertexIndexEndian_Vec = kSysConst_LineLoopClosingIndex_Vec + 1,
-    kSysConst_VertexIndexEndian_Comp = 0,
-    kSysConst_VertexBaseIndex_Vec = kSysConst_VertexIndexEndian_Vec,
-    kSysConst_VertexBaseIndex_Comp = 1,
-    kSysConst_PointSize_Vec = kSysConst_VertexIndexEndian_Vec,
-    kSysConst_PointSize_Comp = 2,
-
-    kSysConst_PointSizeMinMax_Vec = kSysConst_PointSize_Vec + 1,
-    kSysConst_PointSizeMinMax_Comp = 0,
-    kSysConst_PointScreenToNDC_Vec = kSysConst_PointSizeMinMax_Vec,
-    kSysConst_PointScreenToNDC_Comp = 2,
-
-    // 6 vectors.
-    kSysConst_UserClipPlanes_Vec = kSysConst_PointScreenToNDC_Vec + 1,
-
-    kSysConst_NDCScale_Vec = kSysConst_UserClipPlanes_Vec + 6,
-    kSysConst_NDCScale_Comp = 0,
-    kSysConst_InterpolatorSamplingPattern_Vec = kSysConst_NDCScale_Vec,
-    kSysConst_InterpolatorSamplingPattern_Comp = 3,
-
-    kSysConst_NDCOffset_Vec = kSysConst_InterpolatorSamplingPattern_Vec + 1,
-    kSysConst_NDCOffset_Comp = 0,
-    kSysConst_PSParamGen_Vec = kSysConst_NDCOffset_Vec,
-    kSysConst_PSParamGen_Comp = 3,
-
-    // 2 vectors.
-    kSysConst_TextureSwizzledSigns_Vec = kSysConst_PSParamGen_Vec + 1,
-
-    kSysConst_TexturesResolved_Vec = kSysConst_TextureSwizzledSigns_Vec + 2,
-    kSysConst_TexturesResolved_Comp = 0,
-    kSysConst_SampleCountLog2_Vec = kSysConst_TexturesResolved_Vec,
-    kSysConst_SampleCountLog2_Comp = 1,
-    kSysConst_AlphaTestReference_Vec = kSysConst_TexturesResolved_Vec,
-    kSysConst_AlphaTestReference_Comp = 3,
-
-    kSysConst_ColorExpBias_Vec = kSysConst_AlphaTestReference_Vec + 1,
-
-    kSysConst_AlphaToMask_Vec = kSysConst_ColorExpBias_Vec + 1,
-    kSysConst_AlphaToMask_Comp = 0,
-    kSysConst_EdramPitchTiles_Vec = kSysConst_AlphaToMask_Vec,
-    kSysConst_EdramPitchTiles_Comp = 1,
-    kSysConst_EdramDepthRange_Vec = kSysConst_AlphaToMask_Vec,
-    kSysConst_EdramDepthRangeScale_Comp = 2,
-    kSysConst_EdramDepthRangeOffset_Comp = 3,
-
-    kSysConst_EdramPolyOffsetFront_Vec = kSysConst_EdramDepthRange_Vec + 1,
-    kSysConst_EdramPolyOffsetFrontScale_Comp = 0,
-    kSysConst_EdramPolyOffsetFrontOffset_Comp = 1,
-    kSysConst_EdramPolyOffsetBack_Vec = kSysConst_EdramPolyOffsetFront_Vec,
-    kSysConst_EdramPolyOffsetBackScale_Comp = 2,
-    kSysConst_EdramPolyOffsetBackOffset_Comp = 3,
-
-    kSysConst_EdramDepthBaseDwords_Vec = kSysConst_EdramPolyOffsetBack_Vec + 1,
-    kSysConst_EdramDepthBaseDwords_Comp = 0,
-
-    // 2 vectors.
-    kSysConst_EdramStencil_Vec = kSysConst_EdramDepthBaseDwords_Vec + 1,
-    kSysConst_EdramStencil_Front_Vec = kSysConst_EdramStencil_Vec,
-    kSysConst_EdramStencil_Back_Vec,
-    kSysConst_EdramStencil_Reference_Comp = 0,
-    kSysConst_EdramStencil_ReadMask_Comp,
-    kSysConst_EdramStencil_WriteMask_Comp,
-    kSysConst_EdramStencil_FuncOps_Comp,
-
-    kSysConst_EdramRTBaseDwordsScaled_Vec = kSysConst_EdramStencil_Vec + 2,
-
-    kSysConst_EdramRTFormatFlags_Vec =
-        kSysConst_EdramRTBaseDwordsScaled_Vec + 1,
-
-    // 4 vectors.
-    kSysConst_EdramRTClamp_Vec = kSysConst_EdramRTFormatFlags_Vec + 1,
-
-    // 2 vectors (render targets 01 and 23).
-    kSysConst_EdramRTKeepMask_Vec = kSysConst_EdramRTClamp_Vec + 4,
-
-    kSysConst_EdramRTBlendFactorsOps_Vec = kSysConst_EdramRTKeepMask_Vec + 2,
-
-    kSysConst_EdramBlendConstant_Vec = kSysConst_EdramRTBlendFactorsOps_Vec + 1,
-  };
-  static_assert(kSysConst_Count <= 64,
-                "Too many system constants, can't use uint64_t for usage bits");
-
-  static constexpr uint32_t kPointParametersTexCoord = xenos::kMaxInterpolators;
-  static constexpr uint32_t kClipSpaceZWTexCoord = kPointParametersTexCoord + 1;
-
-  enum class InOutRegister : uint32_t {
-    // IF ANY OF THESE ARE CHANGED, WriteInputSignature and WriteOutputSignature
-    // MUST BE UPDATED!
-    kVSInVertexIndex = 0,
-
-    kDSInControlPointIndex = 0,
-
-    kVSDSOutInterpolators = 0,
-    kVSDSOutPointParameters = kVSDSOutInterpolators + xenos::kMaxInterpolators,
-    kVSDSOutClipSpaceZW,
-    kVSDSOutPosition,
-    // Clip and cull distances must be tightly packed in Direct3D!
-    kVSDSOutClipDistance0123,
-    kVSDSOutClipDistance45AndCullDistance,
-    // TODO(Triang3l): Use SV_CullDistance instead for
-    // PA_CL_CLIP_CNTL::UCP_CULL_ONLY_ENA, but can't have more than 8 clip and
-    // cull distances in total. Currently only using SV_CullDistance for vertex
-    // kill.
-
-    kPSInInterpolators = 0,
-    kPSInPointParameters = kPSInInterpolators + xenos::kMaxInterpolators,
-    kPSInClipSpaceZW,
-    kPSInPosition,
-    // nointerpolation inputs. SV_IsFrontFace (X) is always present for
-    // ps_param_gen, SV_SampleIndex (Y) is conditional (only for memexport when
-    // sample-rate shading is otherwise needed anyway due to depth conversion).
-    kPSInFrontFaceAndSampleIndex,
-  };
-
+  // GetSystemConstantSrc + MarkSystemConstantUsed is for special cases of
+  // building the source unconditionally - in general, LoadSystemConstant must
+  // be used instead.
+  void MarkSystemConstantUsed(SystemConstants::Index index) {
+    system_constants_used_ |= uint64_t(1) << uint32_t(index);
+  }
   // Offset should be offsetof(SystemConstants, field). Swizzle values are
   // relative to the first component in the vector according to offsetof - to
   // request a scalar, use XXXX swizzle, and if it's at +4 in its 16-byte
-  // vector, it will be turned into YYYY, and so on.
-  // TODO(Triang3l): Index to enum class.
-  dxbc::Src LoadSystemConstant(uint32_t index, size_t offset,
-                               uint32_t swizzle) {
-    system_constants_used_ |= uint64_t(1) << index;
+  // vector, it will be turned into YYYY, and so on. The swizzle may include
+  // out-of-bounds components of the vector for simplicity of use, assuming they
+  // will be dropped anyway later.
+  dxbc::Src GetSystemConstantSrc(size_t offset, uint32_t swizzle) const {
     uint32_t first_component = uint32_t((offset >> 2) & 3);
-    return dxbc::Src::CB(cbuffer_index_system_constants_,
-                         uint32_t(CbufferRegister::kSystemConstants),
-                         uint32_t(offset >> 4),
-                         first_component * 0b01010101 + swizzle);
+    return dxbc::Src::CB(
+        cbuffer_index_system_constants_,
+        uint32_t(CbufferRegister::kSystemConstants), uint32_t(offset >> 4),
+        std::min((swizzle & 3) + first_component, uint32_t(3)) |
+            std::min(((swizzle >> 2) & 3) + first_component, uint32_t(3)) << 2 |
+            std::min(((swizzle >> 4) & 3) + first_component, uint32_t(3)) << 4 |
+            std::min(((swizzle >> 6) & 3) + first_component, uint32_t(3)) << 6);
+  }
+  dxbc::Src LoadSystemConstant(SystemConstants::Index index, size_t offset,
+                               uint32_t swizzle) {
+    MarkSystemConstantUsed(index);
+    return GetSystemConstantSrc(offset, swizzle);
+  }
+  dxbc::Src LoadFlagsSystemConstant() {
+    return LoadSystemConstant(SystemConstants::Index::kFlags,
+                              offsetof(SystemConstants, flags),
+                              dxbc::Src::kXXXX);
   }
 
   Modification GetDxbcShaderModification() const {
@@ -706,13 +646,27 @@ class DxbcShaderTranslator : public ShaderTranslator {
 
   bool IsDxbcVertexShader() const {
     return is_vertex_shader() &&
-           GetDxbcShaderModification().vertex.host_vertex_shader_type ==
-               Shader::HostVertexShaderType::kVertex;
+           !Shader::IsHostVertexShaderTypeDomain(
+               GetDxbcShaderModification().vertex.host_vertex_shader_type);
   }
   bool IsDxbcDomainShader() const {
     return is_vertex_shader() &&
-           GetDxbcShaderModification().vertex.host_vertex_shader_type !=
-               Shader::HostVertexShaderType::kVertex;
+           Shader::IsHostVertexShaderTypeDomain(
+               GetDxbcShaderModification().vertex.host_vertex_shader_type);
+  }
+
+  bool IsForceEarlyDepthStencilGlobalFlagEnabled() const {
+    return is_pixel_shader() &&
+           GetDxbcShaderModification().pixel.depth_stencil_mode ==
+               Modification::DepthStencilMode::kEarlyHint &&
+           !edram_rov_used_ &&
+           current_shader().implicit_early_z_write_allowed();
+  }
+
+  uint32_t GetModificationInterpolatorMask() const {
+    Modification modification = GetDxbcShaderModification();
+    return is_vertex_shader() ? modification.vertex.interpolator_mask
+                              : modification.pixel.interpolator_mask;
   }
 
   // Whether to use switch-case rather than if (pc >= label) for control flow.
@@ -724,15 +678,28 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // Frees the last allocated internal r# registers for later reuse.
   void PopSystemTemp(uint32_t count = 1);
 
-  // Converts one scalar to or from PWL gamma, using 1 temporary scalar.
-  // The target may be the same as any of the source, the piece temporary or the
-  // accumulator, but not two or three of these.
-  // The piece and the accumulator can't be the same as source or as each other.
-  void ConvertPWLGamma(bool to_gamma, int32_t source_temp,
-                       uint32_t source_temp_component, uint32_t target_temp,
-                       uint32_t target_temp_component, uint32_t piece_temp,
-                       uint32_t piece_temp_component, uint32_t accumulator_temp,
-                       uint32_t accumulator_temp_component);
+  // ExportToMemory modifies the values of eA/eM# for simplicity, call only
+  // before starting a new export or ending the invocation or making it
+  // inactive.
+  void ExportToMemory(uint8_t export_eM);
+
+  // Converts one scalar from piecewise linear gamma to linear. The target may
+  // be the same as the source, the temporary variables must be different. If
+  // the source is not pre-saturated, saturation will be done internally.
+  void PWLGammaToLinear(uint32_t target_temp, uint32_t target_temp_component,
+                        uint32_t source_temp, uint32_t source_temp_component,
+                        bool source_pre_saturated, uint32_t temp1,
+                        uint32_t temp1_component, uint32_t temp2,
+                        uint32_t temp2_component);
+  // Converts one scalar, which must be saturated before calling this function,
+  // from linear to piecewise linear gamma. The target may be the same as either
+  // the source or as temp_or_target, but not as both (and temp_or_target may
+  // not be the same as the source). temp_non_target must be different.
+  void PreSaturatedLinearToPWLGamma(
+      uint32_t target_temp, uint32_t target_temp_component,
+      uint32_t source_temp, uint32_t source_temp_component,
+      uint32_t temp_or_target, uint32_t temp_or_target_component,
+      uint32_t temp_non_target, uint32_t temp_non_target_component);
 
   bool IsSampleRate() const {
     assert_true(is_pixel_shader());
@@ -740,15 +707,15 @@ class DxbcShaderTranslator : public ShaderTranslator {
   }
   bool IsDepthStencilSystemTempUsed() const {
     // See system_temp_depth_stencil_ documentation for explanation of cases.
+    if (edram_rov_used_) {
+      // Needed for all cases (early, late, late with oDepth).
+      return true;
+    }
     if (current_shader().writes_depth()) {
       // With host render targets, the depth format may be float24, in this
       // case, need to multiply it by 0.5 since 0...1 of the guest is stored as
       // 0...0.5 on the host, and also to convert it.
       // With ROV, need to store it to write later.
-      return true;
-    }
-    if (edram_rov_used_ && ROV_IsDepthStencilEarly()) {
-      // Calculated in the beginning, written possibly in the end.
       return true;
     }
     return false;
@@ -768,8 +735,9 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // Whether it's possible and worth skipping running the translated shader for
   // 2x2 quads.
   bool ROV_IsDepthStencilEarly() const {
+    assert_true(edram_rov_used_);
     return !is_depth_only_pixel_shader_ && !current_shader().writes_depth() &&
-           !current_shader().is_valid_memexport_used();
+           !current_shader().memexport_eM_written();
   }
   // Converts the pre-clamped depth value to 24-bit (storing the result in bits
   // 0:23 and zeros in 24:31, not creating room for stencil - since this may be
@@ -815,31 +783,31 @@ class DxbcShaderTranslator : public ShaderTranslator {
                                        uint32_t factor_component);
 
   // Writing the prologue.
+  // Applies the offset to vertex or tessellation patch indices in the source
+  // components, restricts them to the minimum and the maximum index values, and
+  // converts them to floating-point. The destination may be the same as the
+  // source.
+  void RemapAndConvertVertexIndices(uint32_t dest_temp,
+                                    uint32_t dest_temp_components,
+                                    const dxbc::Src& src);
   void StartVertexShader_LoadVertexIndex();
   void StartVertexOrDomainShader();
   void StartDomainShader();
   void StartPixelShader_LoadROVParameters();
   void StartPixelShader();
 
-  // Writing the epilogue.
-  // ExportToMemory modifies the values of eA/eM# for simplicity, don't call
-  // multiple times.
-  void ExportToMemory_PackFixed32(const uint32_t* eM_temps, uint32_t eM_count,
-                                  const uint32_t bits[4],
-                                  const dxbc::Src& is_integer,
-                                  const dxbc::Src& is_signed);
-  void ExportToMemory();
   void CompleteVertexOrDomainShader();
   // For RTV, adds the sample to coverage_temp.coverage_temp_component if it
-  // passes alpha to mask (except for sample 0, which overwrites the output to
-  // initialize it).
+  // passes alpha to mask (or, if initialize == true (for the first sample
+  // tested), overwrites the output to initialize it).
   // For ROV, masks the sample away from coverage_temp.coverage_temp_component
   // if it doesn't pass alpha to mask.
   // threshold_offset and temp.temp_component can be the same if needed.
   void CompletePixelShader_AlphaToMaskSample(
-      uint32_t sample_index, float threshold_base, dxbc::Src threshold_offset,
-      float threshold_offset_scale, uint32_t coverage_temp,
-      uint32_t coverage_temp_component, uint32_t temp, uint32_t temp_component);
+      bool initialize, uint32_t sample_index, float threshold_base,
+      dxbc::Src threshold_offset, float threshold_offset_scale,
+      uint32_t coverage_temp, uint32_t coverage_temp_component, uint32_t temp,
+      uint32_t temp_component);
   // Performs alpha to coverage if necessary, for RTV, writing to oMask, and for
   // ROV, updating the low (coverage) bits of system_temp_rov_params_.x. Done
   // manually even for RTV to maintain the guest dithering pattern and because
@@ -950,11 +918,16 @@ class DxbcShaderTranslator : public ShaderTranslator {
         .SelectFromSwizzled(word_index & 1);
   }
 
-  void ProcessVectorAluOperation(const ParsedAluInstruction& instr,
-                                 uint32_t& result_swizzle,
-                                 bool& predicate_written);
-  void ProcessScalarAluOperation(const ParsedAluInstruction& instr,
-                                 bool& predicate_written);
+  void KillPixel(bool condition, const dxbc::Src& condition_src,
+                 uint8_t memexport_eM_potentially_written_before);
+
+  void ProcessVectorAluOperation(
+      const ParsedAluInstruction& instr,
+      uint8_t memexport_eM_potentially_written_before, uint32_t& result_swizzle,
+      bool& predicate_written);
+  void ProcessScalarAluOperation(
+      const ParsedAluInstruction& instr,
+      uint8_t memexport_eM_potentially_written_before, bool& predicate_written);
 
   void WriteResourceDefinition();
   void WriteInputSignature();
@@ -1006,7 +979,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
   bool msaa_2x_supported_;
 
   // Guest pixel host width / height.
-  uint32_t draw_resolution_scale_;
+  uint32_t draw_resolution_scale_x_;
+  uint32_t draw_resolution_scale_y_;
 
   // Is currently writing the empty depth-only pixel shader, for
   // CompleteTranslation.
@@ -1018,7 +992,6 @@ class DxbcShaderTranslator : public ShaderTranslator {
     kFloat2,
     kFloat3,
     kFloat4,
-    kInt,
     kUint,
     kUint2,
     kUint4,
@@ -1071,16 +1044,30 @@ class DxbcShaderTranslator : public ShaderTranslator {
     uint32_t size;
     uint32_t padding_after;
   };
-  static const SystemConstantRdef system_constant_rdef_[kSysConst_Count];
-  // Mask of system constants (1 << kSysConst_#_Index) used in the shader, so
-  // the remaining ones can be marked as unused in RDEF.
+  static const SystemConstantRdef
+      system_constant_rdef_[size_t(SystemConstants::Index::kCount)];
+  // Mask of system constants (1 << SystemConstants::Index) used in the shader,
+  // so the remaining ones can be marked as unused in RDEF.
   uint64_t system_constants_used_;
+
+  uint32_t out_reg_vs_interpolators_;
+  uint32_t out_reg_vs_position_;
+  // Clip and cull distances must be tightly packed in Direct3D.
+  // Up to 6 SV_ClipDistances or SV_CullDistances depending on
+  // user_clip_plane_cull, then one SV_CullDistance if vertex_kill_and is used.
+  uint32_t out_reg_vs_clip_cull_distances_;
+  uint32_t out_reg_vs_point_size_;
+  uint32_t in_reg_ps_interpolators_;
+  uint32_t in_reg_ps_point_coordinates_;
+  uint32_t in_reg_ps_position_;
+  // nointerpolation inputs. SV_IsFrontFace (X) is for non-point PsParamGen,
+  // SV_SampleIndex (Y) is for memexport when sample-rate shading is otherwise
+  // needed anyway due to depth conversion.
+  uint32_t in_reg_ps_front_face_sample_index_;
 
   // Mask of domain location actually used in the domain shader.
   uint32_t in_domain_location_used_;
-  // Whether the primitive ID has been used in the domain shader.
-  bool in_primitive_id_used_;
-  // Whether InOutRegister::kDSInControlPointIndex has been used in the shader.
+  // Whether kInRegisterDSControlPointIndex has been used in the shader.
   bool in_control_point_index_used_;
   // Mask of the pixel/sample position actually used in the pixel shader.
   uint32_t in_position_used_;
@@ -1115,35 +1102,42 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // 8:11 - Whether color buffers have been written to, if not written on the
   //        taken execution path, don't export according to Direct3D 9 register
   //        documentation (some games rely on this behavior).
-  // Y - Absolute resolution-scaled EDRAM offset for depth / stencil, in dwords.
+  // Y - Absolute resolution-scaled EDRAM offset for depth / stencil, in dwords,
+  //     before and during depth testing. During color writing, when the depth /
+  //     stencil address is not needed anymore, current color sample address.
   // Z - Base-relative resolution-scaled EDRAM offset for 32bpp color data, in
   //     dwords.
   // W - Base-relative resolution-scaled EDRAM offset for 64bpp color data, in
   //     dwords.
   uint32_t system_temp_rov_params_;
-  // Two purposes:
+  // Different purposes:
   // - When writing to oDepth: X also used to hold the depth written by the
   //   shader, which, for host render targets, if the depth buffer is float24,
   //   needs to be remapped from guest 0...1 to host 0...0.5 and, if needed,
   //   converted to float24 precision; and for ROV, needs to be written in the
   //   end of the shader.
-  // - Otherwise, when using ROV output with ROV_IsDepthStencilEarly being true:
-  //   New per-sample depth / stencil values, generated during early
-  //   depth / stencil test (actual writing checks coverage bits).
+  // - When not writing to oDepth, but using ROV:
+  //   - ROV_IsDepthStencilEarly: New per-sample depth / stencil values,
+  //     generated during early depth / stencil test (actual writing checks
+  //     the remaining coverage bits).
+  //   - Not ROV_IsDepthStencilEarly: Z gradients in .xy taken in the beginning
+  //     of the shader before any return statement is possibly reached.
   uint32_t system_temp_depth_stencil_;
   // Up to 4 color outputs in pixel shaders (needs to be readable, because of
   // alpha test, alpha to coverage, exponent bias, gamma, and also for ROV
   // writing).
   uint32_t system_temps_color_[4];
 
-  // Bits containing whether each eM# has been written, for up to 16 streams, or
-  // UINT32_MAX if memexport is not used. 8 bits (5 used) for each stream, with
-  // 4 `alloc export`s per component.
-  uint32_t system_temp_memexport_written_;
-  // eA in each `alloc export`, or UINT32_MAX if not used.
-  uint32_t system_temps_memexport_address_[Shader::kMaxMemExports];
-  // eM# in each `alloc export`, or UINT32_MAX if not used.
-  uint32_t system_temps_memexport_data_[Shader::kMaxMemExports][5];
+  // Memory export temporary registers are allocated if the shader writes any
+  // eM# (current_shader().memexport_eM_written() != 0).
+  // X - whether memexport is enabled for this invocation.
+  // Y - which eM# elements have been written so far by the invocation since the
+  //     last memory write.
+  uint32_t system_temp_memexport_enabled_and_eM_written_;
+  // eA.
+  uint32_t system_temp_memexport_address_;
+  // eM#.
+  uint32_t system_temps_memexport_data_[ucode::kMaxMemExportElementCount];
 
   // Vector ALU or fetch result / scratch (since Xenos write masks can contain
   // swizzles).
@@ -1158,7 +1152,9 @@ class DxbcShaderTranslator : public ShaderTranslator {
   uint32_t system_temp_loop_count_;
   // Explicitly set texture gradients and LOD.
   uint32_t system_temp_grad_h_lod_;
-  uint32_t system_temp_grad_v_;
+  // .w stores `base + index * stride` in bytes from the last vfetch_full as it
+  // may be needed by vfetch_mini.
+  uint32_t system_temp_grad_v_vfetch_address_;
 
   // The bool constant number containing the condition for the currently
   // processed exec (or the last - unless a label has reset this), or
@@ -1205,10 +1201,6 @@ class DxbcShaderTranslator : public ShaderTranslator {
   uint32_t uav_index_edram_;
 
   std::vector<SamplerBinding> sampler_bindings_;
-
-  // Number of `alloc export`s encountered so far in the translation. The index
-  // of the current eA/eM# temp register set is this minus 1, if it's not 0.
-  uint32_t memexport_alloc_current_count_;
 };
 
 }  // namespace gpu

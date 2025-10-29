@@ -9,10 +9,11 @@ drivers.
 ### Windows
 
 * Windows 7 or later
-* [Visual Studio 2019 or Visual Studio 2017](https://www.visualstudio.com/downloads/)
+* [Visual Studio 2022, Visual Studio 2019, or Visual Studio 2017](https://www.visualstudio.com/downloads/)
+  * For Visual Studio 2022, MSBuild `v142` must be used due to a compiler bug; See [#2003](https://github.com/xenia-project/xenia/issues/2003).
 * [Python 3.6+](https://www.python.org/downloads/)
   * Ensure Python is in PATH.
-* Windows 10 SDK version 10.0.19041.0 (for Visual Studio 2019, this or any newer version)
+* Windows 11 SDK version 10.0.22000.0 (for Visual Studio 2019, this or any newer version)
 
 ```
 git clone https://github.com/xenia-project/xenia.git
@@ -99,7 +100,7 @@ Clang-9 or newer should be available from system repositories on all up to date 
 You will also need some development libraries. To get them on an Ubuntu system:
 
 ```bash
-sudo apt-get install libgtk-3-dev libpthread-stubs0-dev liblz4-dev libx11-dev libvulkan-dev libsdl2-dev libiberty-dev libunwind-dev libc++-dev libc++abi-dev
+sudo apt-get install libgtk-3-dev libpthread-stubs0-dev liblz4-dev libx11-dev libx11-xcb-dev libvulkan-dev libsdl2-dev libiberty-dev libunwind-dev libc++-dev libc++abi-dev
 ```
 
 In addition, you will need up to date Vulkan libraries and drivers for your hardware, which most distributions have in their standard repositories nowadays.

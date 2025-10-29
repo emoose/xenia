@@ -16,13 +16,13 @@ project("xenia-gpu-d3d12")
   })
   local_platform_files()
   files({
-    "shaders/bin/*.h",
+    "../shaders/bytecode/d3d12_5_1/*.h",
   })
 
 group("src")
 project("xenia-gpu-d3d12-trace-viewer")
   uuid("7b5b9fcb-7bf1-43ff-a774-d4c41c8706be")
-  kind("WindowedApp")
+  single_library_windowed_app_kind()
   language("C++")
   links({
     "xenia-apu",
@@ -30,7 +30,6 @@ project("xenia-gpu-d3d12-trace-viewer")
     "xenia-base",
     "xenia-core",
     "xenia-cpu",
-    "xenia-cpu-backend-x64",
     "xenia-gpu",
     "xenia-gpu-d3d12",
     "xenia-hid",
@@ -54,7 +53,7 @@ project("xenia-gpu-d3d12-trace-viewer")
   })
   files({
     "d3d12_trace_viewer_main.cc",
-    "../../base/main_"..platform_suffix..".cc",
+    "../../ui/windowed_app_main_"..platform_suffix..".cc",
   })
   -- Only create the .user file if it doesn't already exist.
   local user_file = project_root.."/build/xenia-gpu-d3d12-trace-viewer.vcxproj.user"
@@ -65,6 +64,11 @@ project("xenia-gpu-d3d12-trace-viewer")
       "1>scratch/stdout-trace-viewer.txt",
     })
   end
+
+  filter("architecture:x86_64")
+    links({
+      "xenia-cpu-backend-x64",
+    })
 
 group("src")
 project("xenia-gpu-d3d12-trace-dump")
@@ -77,7 +81,6 @@ project("xenia-gpu-d3d12-trace-dump")
     "xenia-base",
     "xenia-core",
     "xenia-cpu",
-    "xenia-cpu-backend-x64",
     "xenia-gpu",
     "xenia-gpu-d3d12",
     "xenia-hid",
@@ -101,7 +104,7 @@ project("xenia-gpu-d3d12-trace-dump")
   })
   files({
     "d3d12_trace_dump_main.cc",
-    "../../base/main_"..platform_suffix..".cc",
+    "../../base/console_app_main_"..platform_suffix..".cc",
   })
   -- Only create the .user file if it doesn't already exist.
   local user_file = project_root.."/build/xenia-gpu-d3d12-trace-dump.vcxproj.user"
@@ -112,3 +115,8 @@ project("xenia-gpu-d3d12-trace-dump")
       "1>scratch/stdout-trace-dump.txt",
     })
   end
+
+  filter("architecture:x86_64")
+    links({
+      "xenia-cpu-backend-x64",
+    })

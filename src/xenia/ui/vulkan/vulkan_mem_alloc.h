@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2018 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -10,32 +10,27 @@
 #ifndef XENIA_UI_VULKAN_VULKAN_MEM_ALLOC_H_
 #define XENIA_UI_VULKAN_VULKAN_MEM_ALLOC_H_
 
-#include "third_party/volk/volk.h"
+// Make sure vulkan.h is included from third_party (rather than from the system
+// include directory) before vk_mem_alloc.h.
+
+#include "xenia/ui/vulkan/vulkan_device.h"
 
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
-#include "third_party/vulkan/vk_mem_alloc.h"
+// Work around the pointer nullability completeness warnings on Clang.
+#ifndef VMA_NULLABLE
+#define VMA_NULLABLE
+#endif
+#ifndef VMA_NOT_NULL
+#define VMA_NOT_NULL
+#endif
+#include "third_party/VulkanMemoryAllocator/include/vk_mem_alloc.h"
 
 namespace xe {
 namespace ui {
 namespace vulkan {
 
-inline void FillVMAVulkanFunctions(VmaVulkanFunctions* vma_funcs) {
-  vma_funcs->vkGetPhysicalDeviceProperties = vkGetPhysicalDeviceProperties;
-  vma_funcs->vkGetPhysicalDeviceMemoryProperties =
-      vkGetPhysicalDeviceMemoryProperties;
-  vma_funcs->vkAllocateMemory = vkAllocateMemory;
-  vma_funcs->vkFreeMemory = vkFreeMemory;
-  vma_funcs->vkMapMemory = vkMapMemory;
-  vma_funcs->vkUnmapMemory = vkUnmapMemory;
-  vma_funcs->vkBindBufferMemory = vkBindBufferMemory;
-  vma_funcs->vkBindImageMemory = vkBindImageMemory;
-  vma_funcs->vkGetBufferMemoryRequirements = vkGetBufferMemoryRequirements;
-  vma_funcs->vkGetImageMemoryRequirements = vkGetImageMemoryRequirements;
-  vma_funcs->vkCreateBuffer = vkCreateBuffer;
-  vma_funcs->vkDestroyBuffer = vkDestroyBuffer;
-  vma_funcs->vkCreateImage = vkCreateImage;
-  vma_funcs->vkDestroyImage = vkDestroyImage;
-}
+VmaAllocator CreateVmaAllocator(const VulkanDevice* vulkan_device,
+                                bool externally_synchronized);
 
 }  // namespace vulkan
 }  // namespace ui

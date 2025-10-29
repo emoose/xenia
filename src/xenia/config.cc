@@ -25,6 +25,14 @@ std::shared_ptr<cpptoml::table> ParseFile(
     throw cpptoml::parse_exception(xe::path_to_utf8(filename) +
                                    " could not be opened for parsing");
   }
+  // since cpptoml can't parse files with a UTF-8 BOM we need to skip them
+  char bom[3];
+  file.read(bom, sizeof(bom));
+  if (file.fail() || bom[0] != '\xEF' || bom[1] != '\xBB' || bom[2] != '\xBF') {
+    file.clear();
+    file.seekg(0);
+  }
+
   cpptoml::parser p(file);
   return p.parse();
 }
@@ -97,6 +105,10 @@ void ReadGameConfig(const std::filesystem::path& file_path) {
 }
 
 void SaveConfig() {
+  if (config_path.empty()) {
+    return;
+  }
+
   // All cvar defaults have been updated on loading - store the current date.
   auto defaults_date_cvar =
       dynamic_cast<cvar::ConfigVar<uint32_t>*>(cv::cv_defaults_date);

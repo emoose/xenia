@@ -1,0 +1,87 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#include "xesl.xesli"
+
+#include "amd_language.xesli"
+
+#if XE_GUEST_OUTPUT_DITHER
+  #include "dither_8bpc.xesli"
+#endif  // XE_GUEST_OUTPUT_DITHER
+
+push_const_begin_xe(b0, space0)
+  // 16 used by the vertex shader (GLSL push constant offsets are across
+  // stages).
+  block_offset_member_xe(16, c0.x, int2_xe, xe_cas_output_offset)
+  // CasSetup const1.x.
+  block_offset_member_xe(24, c0.z, float, xe_cas_sharpness_post_setup)
+push_const_end_xe
+
+// FIXME(Triang3l): This approach doesn't work for MSL - the texture must be
+// passed explicitly from the entry point's arguments to CasLoad.
+
+// Forward declaration because CasLoad needs xe_cas_source from the entry point
+// bindings.
+void CasFilter(out_param_xe(float, pixel_r), out_param_xe(float, pixel_g),
+               out_param_xe(float, pixel_b), uint2_xe pixel_position,
+               uint4_xe const0, uint4_xe const1, bool no_scaling);
+
+entry_outputs_begin_xe
+  entry_out_target_xe(float4_xe, xe_cas_color, 0)
+entry_outputs_end_stage_inputs_begin_xe
+entry_stage_inputs_end_bindings_begin_pixel_xe
+  push_const_binding_xe(buffer(0))
+  entry_binding_next_xe
+  texture_xe(texture_2d_xe, xe_cas_source, set=0, binding=0, t0, space0,
+             texture(0))
+entry_bindings_end_inputs_begin_xe
+  entry_in_pixel_coord_xe
+entry_inputs_end_code_begin_xe
+{
+  uint2_xe pixel_coord = uint2_xe(int2_xe(in_pixel_coord_xe.xy) -
+                                  push_const_xe(xe_cas_output_offset));
+  // CasSetup with smaller push constants usage.
+  uint4_xe cas_const_0 =
+      float_bits_to_uint_xe(float4_xe(1.0f, 1.0f, 0.0f, 0.0f));
+  uint4_xe cas_const_1 =
+      uint4_xe(
+          float_bits_to_uint_xe(push_const_xe(xe_cas_sharpness_post_setup)),
+          pack_half_2x16_xe(float2_xe(
+              push_const_xe(xe_cas_sharpness_post_setup), 0.0f)),
+          float_bits_to_uint_xe(8.0f), 0u);
+  float4_xe cas_color;
+  CasFilter(cas_color.r, cas_color.g, cas_color.b, pixel_coord, cas_const_0,
+            cas_const_1, true);
+  // Linear conversion approximation as recommended in the CAS presentation.
+  cas_color.rgb = sqrt(cas_color.rgb);
+  #if XE_GUEST_OUTPUT_DITHER
+    // Clamping because on Vulkan, the surface may specify any format, including
+    // floating-point.
+    cas_color.rgb =
+        saturate_xe(cas_color.rgb + XeDitherOffset8bpc(pixel_coord));
+  #endif  // XE_GUEST_OUTPUT_DITHER
+  // Force alpha to 1 to make sure the surface won't be translucent.
+  cas_color.a = 1.0f;
+  out_xe(xe_cas_color) = cas_color;
+}
+entry_code_end_xe
+
+#define A_GPU 1
+#include "../../../../third_party/FidelityFX-CAS/ffx-cas/ffx_a.h"
+float3_xe CasLoad(int2_xe p) {
+  return texel_fetch_2d_xe(xe_cas_source, p, 0).rgb;
+}
+void CasInput(inout_param_xe(float, r), inout_param_xe(float, g),
+              inout_param_xe(float, b)) {
+  // Linear conversion approximation as recommended in the CAS presentation.
+  r *= r;
+  g *= g;
+  b *= b;
+}
+#include "../../../../third_party/FidelityFX-CAS/ffx-cas/ffx_cas.h"

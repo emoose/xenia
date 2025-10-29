@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2019 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -22,7 +22,6 @@
 
 // NOTE: must be included last as it expects windows.h to already be included.
 #include "third_party/xbyak/xbyak/xbyak.h"
-#include "third_party/xbyak/xbyak/xbyak_bin2hex.h"
 #include "third_party/xbyak/xbyak/xbyak_util.h"
 
 namespace xe {
@@ -49,6 +48,7 @@ enum RegisterFlags {
 enum XmmConst {
   XMMZero = 0,
   XMMOne,
+  XMMOnePD,
   XMMNegativeOne,
   XMMFFFF,
   XMMMaskX16Y16,
@@ -125,12 +125,25 @@ class XbyakAllocator : public Xbyak::Allocator {
 };
 
 enum X64EmitterFeatureFlags {
-  kX64EmitAVX2 = 1 << 1,
-  kX64EmitFMA = 1 << 2,
-  kX64EmitLZCNT = 1 << 3,
+  kX64EmitAVX2 = 1 << 0,
+  kX64EmitFMA = 1 << 1,
+  kX64EmitLZCNT = 1 << 2,
+  kX64EmitBMI1 = 1 << 3,
   kX64EmitBMI2 = 1 << 4,
   kX64EmitF16C = 1 << 5,
   kX64EmitMovbe = 1 << 6,
+  kX64EmitGFNI = 1 << 7,
+
+  kX64EmitAVX512F = 1 << 8,
+  kX64EmitAVX512VL = 1 << 9,
+
+  kX64EmitAVX512BW = 1 << 10,
+  kX64EmitAVX512DQ = 1 << 11,
+
+  kX64EmitAVX512VBMI = 1 << 12,
+
+  kX64EmitAVX512Ortho = kX64EmitAVX512F | kX64EmitAVX512VL,
+  kX64EmitAVX512Ortho64 = kX64EmitAVX512Ortho | kX64EmitAVX512DQ
 };
 
 class X64Emitter : public Xbyak::CodeGenerator {
@@ -221,7 +234,7 @@ class X64Emitter : public Xbyak::CodeGenerator {
   Xbyak::Address StashConstantXmm(int index, const vec128_t& v);
 
   bool IsFeatureEnabled(uint32_t feature_flag) const {
-    return (feature_flags_ & feature_flag) != 0;
+    return (feature_flags_ & feature_flag) == feature_flag;
   }
 
   FunctionDebugInfo* debug_info() const { return debug_info_; }

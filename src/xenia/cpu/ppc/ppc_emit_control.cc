@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2021 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -426,6 +426,10 @@ int InstrEmit_sc(PPCHIRBuilder& f, const InstrData& i) {
   // Game code should only ever use LEV=0.
   // LEV=2 is to signify 'call import' from Xenia.
   // TODO(gibbed): syscalls!
+  if (i.SC.LEV == 0) {
+    f.CallExtern(f.builtins()->syscall_handler);
+    return 0;
+  }
   if (i.SC.LEV == 2) {
     f.CallExtern(f.function());
     return 0;
@@ -615,6 +619,16 @@ int InstrEmit_mfspr(PPCHIRBuilder& f, const InstrData& i) {
     case 269:
       // TBU
       v = f.Shr(f.LoadClock(), 32);
+      break;
+    case 287:
+      // [ Processor Version Register (PVR) ]
+      // PVR is a 32 bit, read-only register within the supervisor level.
+      // Bits 0 to 15 are the version number.
+      // Bits 16 to 31 are the revision number.
+      // Known Values: 0x710600?, 0x710700, 0x710800 (Corona?);
+      // Note: Some XEXs (such as mfgbootlauncher.xex) may check for a value
+      // that's less than 0x710700.
+      v = f.LoadConstantUint64(cvars::pvr);
       break;
     default:
       XEINSTRNOTIMPLEMENTED();
@@ -806,6 +820,6 @@ void RegisterEmitCategoryControl() {
   XEREGISTERINSTR(mtmsrd);
 }
 
+}  // namespace ppc
 }  // namespace cpu
-}  // namespace xe
 }  // namespace xe

@@ -12,10 +12,12 @@
 
 #include <memory>
 
+#include "xenia/ui/immediate_drawer.h"
+#include "xenia/ui/presenter.h"
+
 namespace xe {
 namespace ui {
 
-class GraphicsContext;
 class Window;
 
 // Factory for graphics contexts.
@@ -34,23 +36,23 @@ class GraphicsProvider {
     kQualcomm = 0x5143,
   };
 
+  GraphicsProvider(const GraphicsProvider&) = delete;
+  GraphicsProvider& operator=(const GraphicsProvider&) = delete;
+  GraphicsProvider(GraphicsProvider&&) = delete;
+  GraphicsProvider& operator=(GraphicsProvider&&) = delete;
+
   virtual ~GraphicsProvider() = default;
 
-  // The 'main' window of an application, used to query provider information.
-  Window* main_window() const { return main_window_; }
+  // It's safe to reinitialize the presenter in the host GPU loss callback if it
+  // was called from the UI thread as specified in the arguments.
+  virtual std::unique_ptr<Presenter> CreatePresenter(
+      Presenter::HostGpuLossCallback host_gpu_loss_callback =
+          Presenter::FatalErrorHostGpuLossCallback) = 0;
 
-  // Creates a new graphics context and swapchain for presenting to a window.
-  virtual std::unique_ptr<GraphicsContext> CreateContext(
-      Window* target_window) = 0;
-
-  // Creates a new offscreen graphics context without a swapchain or immediate
-  // drawer.
-  virtual std::unique_ptr<GraphicsContext> CreateOffscreenContext() = 0;
+  virtual std::unique_ptr<ImmediateDrawer> CreateImmediateDrawer() = 0;
 
  protected:
-  explicit GraphicsProvider(Window* main_window) : main_window_(main_window) {}
-
-  Window* main_window_ = nullptr;
+  GraphicsProvider() = default;
 };
 
 }  // namespace ui

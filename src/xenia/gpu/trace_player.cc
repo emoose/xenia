@@ -2,24 +2,26 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2015 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
 #include "xenia/gpu/trace_player.h"
 
+#include <memory>
+
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
+#include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/memory.h"
 
 namespace xe {
 namespace gpu {
 
-TracePlayer::TracePlayer(xe::ui::Loop* loop, GraphicsSystem* graphics_system)
-    : loop_(loop),
-      graphics_system_(graphics_system),
+TracePlayer::TracePlayer(GraphicsSystem* graphics_system)
+    : graphics_system_(graphics_system),
       current_frame_index_(0),
       current_command_index_(-1) {
   // Need to allocate all of physical memory so that we can write to it during
@@ -31,9 +33,8 @@ TracePlayer::TracePlayer(xe::ui::Loop* loop, GraphicsSystem* graphics_system)
                    kMemoryProtectRead | kMemoryProtectWrite);
 
   playback_event_ = xe::threading::Event::CreateAutoResetEvent(false);
+  assert_not_null(playback_event_);
 }
-
-TracePlayer::~TracePlayer() { delete[] edram_snapshot_; }
 
 const TraceReader::Frame* TracePlayer::current_frame() const {
   if (current_frame_index_ >= frame_count()) {
@@ -104,7 +105,6 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
     command_processor->ClearCaches();
   }
 
-  command_processor->set_swap_mode(SwapMode::kIgnored);
   playback_percent_ = 0;
   auto trace_end = trace_data + trace_size;
 
@@ -190,13 +190,12 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
       case TraceCommandType::kEdramSnapshot: {
         auto cmd = reinterpret_cast<const EdramSnapshotCommand*>(trace_ptr);
         trace_ptr += sizeof(*cmd);
-        if (!edram_snapshot_) {
-          edram_snapshot_ = new uint8_t[xenos::kEdramSizeBytes];
-        }
+        std::unique_ptr<uint8_t[]> edram_snapshot(
+            new uint8_t[xenos::kEdramSizeBytes]);
         DecompressMemory(cmd->encoding_format, trace_ptr, cmd->encoded_length,
-                         edram_snapshot_, xenos::kEdramSizeBytes);
+                         edram_snapshot.get(), xenos::kEdramSizeBytes);
         trace_ptr += cmd->encoded_length;
-        command_processor->RestoreEdramSnapshot(edram_snapshot_);
+        command_processor->RestoreEdramSnapshot(edram_snapshot.get());
         break;
       }
       case TraceCommandType::kEvent: {
@@ -212,12 +211,38 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
         }
         break;
       }
+      case TraceCommandType::kRegisters: {
+        auto cmd = reinterpret_cast<const RegistersCommand*>(trace_ptr);
+        trace_ptr += sizeof(*cmd);
+        std::unique_ptr<uint32_t[]> register_values(
+            new uint32_t[cmd->register_count]);
+        DecompressMemory(cmd->encoding_format, trace_ptr, cmd->encoded_length,
+                         register_values.get(),
+                         sizeof(uint32_t) * cmd->register_count);
+        trace_ptr += cmd->encoded_length;
+        command_processor->RestoreRegisters(
+            cmd->first_register, register_values.get(), cmd->register_count,
+            cmd->execute_callbacks);
+        break;
+      }
+      case TraceCommandType::kGammaRamp: {
+        auto cmd = reinterpret_cast<const GammaRampCommand*>(trace_ptr);
+        trace_ptr += sizeof(*cmd);
+        std::unique_ptr<uint32_t[]> gamma_ramps(new uint32_t[256 + 3 * 128]);
+        DecompressMemory(cmd->encoding_format, trace_ptr, cmd->encoded_length,
+                         gamma_ramps.get(), sizeof(uint32_t) * (256 + 3 * 128));
+        trace_ptr += cmd->encoded_length;
+        command_processor->RestoreGammaRamp(
+            reinterpret_cast<const reg::DC_LUT_30_COLOR*>(gamma_ramps.get()),
+            reinterpret_cast<const reg::DC_LUT_PWL_DATA*>(gamma_ramps.get() +
+                                                          256),
+            cmd->rw_component);
+        break;
+      }
     }
   }
 
   playing_trace_ = false;
-  command_processor->set_swap_mode(SwapMode::kNormal);
-  command_processor->IssueSwap(0, 1280, 720);
 
   playback_event_->Set();
 }

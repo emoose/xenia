@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -14,8 +14,10 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "xenia/base/platform.h"
 #include "xenia/base/string.h"
 
 namespace xe {
@@ -41,8 +43,8 @@ std::filesystem::path GetUserFolder();
 // attempting to create it.
 bool CreateParentFolder(const std::filesystem::path& path);
 
-// Creates an empty file at the given path.
-bool CreateFile(const std::filesystem::path& path);
+// Creates an empty file at the given path, overwriting if it exists.
+bool CreateEmptyFile(const std::filesystem::path& path);
 
 // Opens the file at the given path with the specified mode.
 // This behaves like fopen and the returned handle can be used with stdio.
@@ -121,6 +123,14 @@ struct FileInfo {
 };
 bool GetInfo(const std::filesystem::path& path, FileInfo* out_info);
 std::vector<FileInfo> ListFiles(const std::filesystem::path& path);
+
+#if XE_PLATFORM_ANDROID
+void AndroidInitialize();
+void AndroidShutdown();
+bool IsAndroidContentUri(const std::string_view source);
+int OpenAndroidContentFileDescriptor(const std::string_view uri,
+                                     const char* mode);
+#endif  // XE_PLATFORM_ANDROID
 
 }  // namespace filesystem
 }  // namespace xe

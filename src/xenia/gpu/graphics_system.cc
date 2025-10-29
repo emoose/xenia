@@ -2,12 +2,18 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
 #include "xenia/gpu/graphics_system.h"
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <utility>
 
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
@@ -18,7 +24,8 @@
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/ui/graphics_provider.h"
-#include "xenia/ui/loop.h"
+#include "xenia/ui/window.h"
+#include "xenia/ui/windowed_app_context.h"
 
 DEFINE_bool(
     store_shaders, true,
@@ -47,66 +54,38 @@ GraphicsSystem::~GraphicsSystem() = default;
 
 X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                                kernel::KernelState* kernel_state,
-                               ui::Window* target_window) {
+                               ui::WindowedAppContext* app_context,
+                               bool with_presentation) {
   memory_ = processor->memory();
   processor_ = processor;
   kernel_state_ = kernel_state;
-  target_window_ = target_window;
+  app_context_ = app_context;
 
-  // Initialize display and rendering context.
-  // This must happen on the UI thread.
-  std::unique_ptr<xe::ui::GraphicsContext> processor_context = nullptr;
-  if (provider_) {
-    if (target_window_) {
-      target_window_->loop()->PostSynchronous([&]() {
-        // Create the context used for presentation.
-        assert_null(target_window->context());
-        target_window_->set_context(provider_->CreateContext(target_window_));
-
-        // Setup the context the command processor will do all its drawing in.
-        // It's shared with the display context so that we can resolve
-        // framebuffers from it.
-        processor_context = provider()->CreateOffscreenContext();
+  if (with_presentation && provider_) {
+    // Safe if either the UI thread call or the presenter creation fails.
+    if (app_context_) {
+      app_context_->CallInUIThreadSynchronous([this]() {
+        presenter_ = provider_->CreatePresenter(
+            [this](bool is_responsible, bool statically_from_ui_thread) {
+              OnHostGpuLossFromAnyThread(is_responsible);
+            });
       });
     } else {
-      processor_context = provider()->CreateOffscreenContext();
-    }
-
-    if (!processor_context) {
-      xe::FatalError(
-          "Unable to initialize graphics context. Xenia requires Vulkan "
-          "support.\n"
-          "\n"
-          "Ensure you have the latest drivers for your GPU and "
-          "that it supports Vulkan.\n"
-          "\n"
-          "See https://xenia.jp/faq/ for more information and a list of "
-          "supported GPUs.");
-      return X_STATUS_UNSUCCESSFUL;
+      // May be needed for offscreen use, such as capturing the guest output
+      // image.
+      presenter_ = provider_->CreatePresenter(
+          [this](bool is_responsible, bool statically_from_ui_thread) {
+            OnHostGpuLossFromAnyThread(is_responsible);
+          });
     }
   }
 
   // Create command processor. This will spin up a thread to process all
   // incoming ringbuffer packets.
   command_processor_ = CreateCommandProcessor();
-  if (!command_processor_->Initialize(std::move(processor_context))) {
+  if (!command_processor_->Initialize()) {
     XELOGE("Unable to initialize command processor");
     return X_STATUS_UNSUCCESSFUL;
-  }
-
-  if (target_window) {
-    command_processor_->set_swap_request_handler(
-        [this]() { target_window_->Invalidate(); });
-
-    // Watch for paint requests to do our swap.
-    target_window->on_painting.AddListener(
-        [this](xe::ui::UIEvent* e) { Swap(e); });
-
-    // Watch for context lost events.
-    target_window->on_context_lost.AddListener(
-        [this](xe::ui::UIEvent* e) { Reset(); });
-  } else {
-    command_processor_->set_swap_request_handler([]() {});
   }
 
   // Let the processor know we want register access callbacks.
@@ -149,6 +128,7 @@ void GraphicsSystem::Shutdown() {
   if (command_processor_) {
     EndTracing();
     command_processor_->Shutdown();
+    command_processor_.reset();
   }
 
   if (vsync_worker_thread_) {
@@ -156,13 +136,35 @@ void GraphicsSystem::Shutdown() {
     vsync_worker_thread_->Wait(0, 0, 0, nullptr);
     vsync_worker_thread_.reset();
   }
+
+  if (presenter_) {
+    if (app_context_) {
+      app_context_->CallInUIThreadSynchronous([this]() { presenter_.reset(); });
+    }
+    // If there's no app context (thus the presenter is owned by the thread that
+    // initialized the GraphicsSystem) or can't be queueing UI thread calls
+    // anymore, shutdown anyway.
+    presenter_.reset();
+  }
+
+  provider_.reset();
 }
 
-void GraphicsSystem::Reset() {
-  // TODO(DrChat): Reset the system.
-  XELOGI("Context lost; Reset invoked");
-  Shutdown();
-
+void GraphicsSystem::OnHostGpuLossFromAnyThread(
+    [[maybe_unused]] bool is_responsible) {
+  // TODO(Triang3l): Somehow gain exclusive ownership of the Provider (may be
+  // used by the command processor, the presenter, and possibly anything else,
+  // it's considered free-threaded, except for lifetime management which will be
+  // involved in this case) and reset it so a new host GPU API device is
+  // created. Then ask the command processor to reset itself in its thread, and
+  // ask the UI thread to reset the Presenter (the UI thread manages its
+  // lifetime - but if there's no WindowedAppContext, either don't reset it as
+  // in this case there's no user who needs uninterrupted gameplay, or somehow
+  // protect it with a mutex so any thread can be considered a UI thread and
+  // reset).
+  if (host_gpu_loss_reported_.test_and_set(std::memory_order_relaxed)) {
+    return;
+  }
   xe::FatalError("Graphics device lost (probably due to an internal error)");
 }
 
@@ -199,7 +201,7 @@ uint32_t GraphicsSystem::ReadRegister(uint32_t addr) {
   }
 
   assert_true(r < RegisterFile::kRegisterCount);
-  return register_file_.values[r].u32;
+  return register_file_.values[r];
 }
 
 void GraphicsSystem::WriteRegister(uint32_t addr, uint32_t value) {
@@ -217,7 +219,7 @@ void GraphicsSystem::WriteRegister(uint32_t addr, uint32_t value) {
   }
 
   assert_true(r < RegisterFile::kRegisterCount);
-  register_file_.values[r].u32 = value;
+  register_file_.values[r] = value;
 }
 
 void GraphicsSystem::InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) {

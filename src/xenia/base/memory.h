@@ -15,6 +15,8 @@
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <string_view>
+#include <type_traits>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
@@ -22,6 +24,35 @@
 
 namespace xe {
 namespace memory {
+
+// For variable declarations (not return values or `this` pointer).
+// Not propagated.
+#define XE_RESTRICT_VAR __restrict
+
+// Aliasing-safe bit reinterpretation.
+// For more complex cases such as non-trivially-copyable types, write copying
+// code respecting the requirements for them externally instead of using these
+// functions.
+
+template <typename Dst, typename Src>
+void Reinterpret(Dst& XE_RESTRICT_VAR dst, const Src& XE_RESTRICT_VAR src) {
+  static_assert(sizeof(Dst) == sizeof(Src));
+  static_assert(std::is_trivially_copyable_v<Dst>);
+  static_assert(std::is_trivially_copyable_v<Src>);
+  std::memcpy(&dst, &src, sizeof(Dst));
+}
+
+template <typename Dst, typename Src>
+Dst Reinterpret(const Src& XE_RESTRICT_VAR src) {
+  Dst dst;
+  Reinterpret(dst, src);
+  return dst;
+}
+
+#if XE_PLATFORM_ANDROID
+void AndroidInitialize();
+void AndroidShutdown();
+#endif
 
 // Returns the native page size of the system, in bytes.
 // This should be ~4KiB.
@@ -439,6 +470,26 @@ template <>
 inline void store_and_swap<std::u16string>(void* mem,
                                            const std::u16string& value) {
   return store_and_swap<std::u16string_view>(mem, value);
+}
+
+using fourcc_t = uint32_t;
+
+// Get FourCC in host byte order
+// make_fourcc('a', 'b', 'c', 'd') == 0x61626364
+constexpr inline fourcc_t make_fourcc(char a, char b, char c, char d) {
+  return fourcc_t((static_cast<fourcc_t>(a) << 24) |
+                  (static_cast<fourcc_t>(b) << 16) |
+                  (static_cast<fourcc_t>(c) << 8) | static_cast<fourcc_t>(d));
+}
+
+// Get FourCC in host byte order
+// This overload requires fourcc.length() == 4
+// make_fourcc("abcd") == 'abcd' == 0x61626364 for most compilers
+constexpr inline fourcc_t make_fourcc(const std::string_view fourcc) {
+  if (fourcc.length() != 4) {
+    throw std::runtime_error("Invalid fourcc length");
+  }
+  return make_fourcc(fourcc[0], fourcc[1], fourcc[2], fourcc[3]);
 }
 
 }  // namespace xe

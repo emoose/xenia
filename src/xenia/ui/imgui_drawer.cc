@@ -2,16 +2,23 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
 #include "xenia/ui/imgui_drawer.h"
 
+#include <cfloat>
+#include <cstring>
+
 #include "third_party/imgui/imgui.h"
 #include "xenia/base/assert.h"
+#include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/math.h"
+#include "xenia/ui/imgui_dialog.h"
+#include "xenia/ui/ui_event.h"
 #include "xenia/ui/window.h"
 
 namespace xe {
@@ -25,16 +32,64 @@ const char kProggyTinyCompressedDataBase85[10950 + 1] =
 static_assert(sizeof(ImmediateVertex) == sizeof(ImDrawVert),
               "Vertex types must match");
 
-ImGuiDrawer::ImGuiDrawer(xe::ui::Window* window)
-    : window_(window), graphics_context_(window->context()) {
+ImGuiDrawer::ImGuiDrawer(xe::ui::Window* window, size_t z_order)
+    : window_(window), z_order_(z_order) {
   Initialize();
 }
 
 ImGuiDrawer::~ImGuiDrawer() {
+  SetPresenter(nullptr);
+  if (!dialogs_.empty()) {
+    window_->RemoveInputListener(this);
+    if (internal_state_) {
+      ImGui::SetCurrentContext(internal_state_);
+      if (touch_pointer_id_ == TouchEvent::kPointerIDNone &&
+          ImGui::IsAnyMouseDown()) {
+        window_->ReleaseMouse();
+      }
+    }
+  }
   if (internal_state_) {
     ImGui::DestroyContext(internal_state_);
     internal_state_ = nullptr;
   }
+}
+
+void ImGuiDrawer::AddDialog(ImGuiDialog* dialog) {
+  assert_not_null(dialog);
+  // Check if already added.
+  if (std::find(dialogs_.cbegin(), dialogs_.cend(), dialog) !=
+      dialogs_.cend()) {
+    return;
+  }
+  if (dialogs_.empty() && !IsDrawingDialogs()) {
+    // First dialog added. !IsDrawingDialogs() is also checked because in a
+    // situation of removing the only dialog, then adding a dialog, from within
+    // a dialog's Draw function, re-registering the ImGuiDrawer may result in
+    // ImGui being drawn multiple times in the current frame.
+    window_->AddInputListener(this, z_order_);
+    if (presenter_) {
+      presenter_->AddUIDrawerFromUIThread(this, z_order_);
+    }
+  }
+  dialogs_.push_back(dialog);
+}
+
+void ImGuiDrawer::RemoveDialog(ImGuiDialog* dialog) {
+  assert_not_null(dialog);
+  auto it = std::find(dialogs_.cbegin(), dialogs_.cend(), dialog);
+  if (it == dialogs_.cend()) {
+    return;
+  }
+  if (IsDrawingDialogs()) {
+    // Actualize the next dialog index after the erasure from the vector.
+    size_t existing_index = size_t(std::distance(dialogs_.cbegin(), it));
+    if (dialog_loop_next_index_ > existing_index) {
+      --dialog_loop_next_index_;
+    }
+  }
+  dialogs_.erase(it);
+  DetachIfLastDialogRemoved();
 }
 
 void ImGuiDrawer::Initialize() {
@@ -50,9 +105,31 @@ void ImGuiDrawer::Initialize() {
   // Windows.
   io.IniFilename = nullptr;
 
-  SetupFont();
-
-  io.DeltaTime = 1.0f / 60.0f;
+  // Setup the font glyphs.
+  ImFontConfig font_config;
+  font_config.OversampleH = font_config.OversampleV = 1;
+  font_config.PixelSnapH = true;
+  static const ImWchar font_glyph_ranges[] = {
+      0x0020,
+      0x00FF,  // Basic Latin + Latin Supplement
+      0,
+  };
+  io.Fonts->AddFontFromMemoryCompressedBase85TTF(
+      kProggyTinyCompressedDataBase85, 10.0f, &font_config, font_glyph_ranges);
+  // TODO(benvanik): jp font on other platforms?
+  // https://github.com/Koruri/kibitaki looks really good, but is 1.5MiB.
+  const char* jp_font_path = "C:\\Windows\\Fonts\\msgothic.ttc";
+  if (std::filesystem::exists(jp_font_path)) {
+    ImFontConfig jp_font_config;
+    jp_font_config.MergeMode = true;
+    jp_font_config.OversampleH = jp_font_config.OversampleV = 1;
+    jp_font_config.PixelSnapH = true;
+    jp_font_config.FontNo = 0;
+    io.Fonts->AddFontFromFileTTF(jp_font_path, 12.0f, &jp_font_config,
+                                 io.Fonts->GetGlyphRangesJapanese());
+  } else {
+    XELOGW("Unable to load Japanese font; JP characters will be boxes");
+  }
 
   auto& style = ImGui::GetStyle();
   style.ScrollbarRounding = 0;
@@ -107,77 +184,155 @@ void ImGuiDrawer::Initialize() {
   style.Colors[ImGuiCol_TextSelectedBg] = ImVec4(0.00f, 1.00f, 0.00f, 0.21f);
   style.Colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.20f, 0.20f, 0.20f, 0.35f);
 
-  io.KeyMap[ImGuiKey_Tab] = 0x09;  // VK_TAB;
-  io.KeyMap[ImGuiKey_LeftArrow] = 0x25;
-  io.KeyMap[ImGuiKey_RightArrow] = 0x27;
-  io.KeyMap[ImGuiKey_UpArrow] = 0x26;
-  io.KeyMap[ImGuiKey_DownArrow] = 0x28;
-  io.KeyMap[ImGuiKey_Home] = 0x24;
-  io.KeyMap[ImGuiKey_End] = 0x23;
-  io.KeyMap[ImGuiKey_Delete] = 0x2E;
-  io.KeyMap[ImGuiKey_Backspace] = 0x08;
-  io.KeyMap[ImGuiKey_Enter] = 0x0D;
-  io.KeyMap[ImGuiKey_Escape] = 0x1B;
-  io.KeyMap[ImGuiKey_A] = 'A';
-  io.KeyMap[ImGuiKey_C] = 'C';
-  io.KeyMap[ImGuiKey_V] = 'V';
-  io.KeyMap[ImGuiKey_X] = 'X';
-  io.KeyMap[ImGuiKey_Y] = 'Y';
-  io.KeyMap[ImGuiKey_Z] = 'Z';
+  frame_time_tick_frequency_ = double(Clock::QueryHostTickFrequency());
+  last_frame_time_ticks_ = Clock::QueryHostTickCount();
+
+  touch_pointer_id_ = TouchEvent::kPointerIDNone;
+  reset_mouse_position_after_next_frame_ = false;
 }
 
-void ImGuiDrawer::SetupFont() {
-  auto& io = GetIO();
-
-  ImFontConfig font_config;
-  font_config.OversampleH = font_config.OversampleV = 1;
-  font_config.PixelSnapH = true;
-  static const ImWchar font_glyph_ranges[] = {
-      0x0020,
-      0x00FF,  // Basic Latin + Latin Supplement
-      0,
+std::optional<ImGuiKey> ImGuiDrawer::VirtualKeyToImGuiKey(VirtualKey vkey) {
+  static const std::map<VirtualKey, ImGuiKey> map = {
+      {ui::VirtualKey::kTab, ImGuiKey_Tab},
+      {ui::VirtualKey::kLeft, ImGuiKey_LeftArrow},
+      {ui::VirtualKey::kRight, ImGuiKey_RightArrow},
+      {ui::VirtualKey::kUp, ImGuiKey_UpArrow},
+      {ui::VirtualKey::kDown, ImGuiKey_DownArrow},
+      {ui::VirtualKey::kHome, ImGuiKey_Home},
+      {ui::VirtualKey::kEnd, ImGuiKey_End},
+      {ui::VirtualKey::kDelete, ImGuiKey_Delete},
+      {ui::VirtualKey::kBack, ImGuiKey_Backspace},
+      {ui::VirtualKey::kReturn, ImGuiKey_Enter},
+      {ui::VirtualKey::kEscape, ImGuiKey_Escape},
+      {ui::VirtualKey::kA, ImGuiKey_A},
+      {ui::VirtualKey::kC, ImGuiKey_C},
+      {ui::VirtualKey::kV, ImGuiKey_V},
+      {ui::VirtualKey::kX, ImGuiKey_X},
+      {ui::VirtualKey::kY, ImGuiKey_Y},
+      {ui::VirtualKey::kZ, ImGuiKey_Z},
   };
-  io.Fonts->AddFontFromMemoryCompressedBase85TTF(
-      kProggyTinyCompressedDataBase85, 10.0f, &font_config, font_glyph_ranges);
-
-  // TODO(benvanik): jp font on other platforms?
-  // https://github.com/Koruri/kibitaki looks really good, but is 1.5MiB.
-  const char* jp_font_path = "C:\\Windows\\Fonts\\msgothic.ttc";
-  if (std::filesystem::exists(jp_font_path)) {
-    ImFontConfig jp_font_config;
-    jp_font_config.MergeMode = true;
-    jp_font_config.OversampleH = jp_font_config.OversampleV = 1;
-    jp_font_config.PixelSnapH = true;
-    jp_font_config.FontNo = 0;
-    io.Fonts->AddFontFromFileTTF(jp_font_path, 12.0f, &jp_font_config,
-                                 io.Fonts->GetGlyphRangesJapanese());
+  if (auto search = map.find(vkey); search != map.end()) {
+    return search->second;
   } else {
-    XELOGW("Unable to load japanese font; jp characters will be boxes");
+    return std::nullopt;
   }
+}
 
+void ImGuiDrawer::SetupFontTexture() {
+  if (font_texture_ || !immediate_drawer_) {
+    return;
+  }
+  ImGuiIO& io = GetIO();
   unsigned char* pixels;
   int width, height;
   io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
-
-  font_texture_ = graphics_context_->immediate_drawer()->CreateTexture(
+  font_texture_ = immediate_drawer_->CreateTexture(
       width, height, ImmediateTextureFilter::kLinear, true,
       reinterpret_cast<uint8_t*>(pixels));
-
   io.Fonts->TexID = reinterpret_cast<ImTextureID>(font_texture_.get());
 }
 
-void ImGuiDrawer::RenderDrawLists(ImDrawData* data) {
-  auto drawer = graphics_context_->immediate_drawer();
+void ImGuiDrawer::SetPresenter(Presenter* new_presenter) {
+  if (presenter_) {
+    if (presenter_ == new_presenter) {
+      return;
+    }
+    if (!dialogs_.empty()) {
+      presenter_->RemoveUIDrawerFromUIThread(this);
+    }
+    ImGuiIO& io = GetIO();
+  }
+  presenter_ = new_presenter;
+  if (presenter_) {
+    if (!dialogs_.empty()) {
+      presenter_->AddUIDrawerFromUIThread(this, z_order_);
+    }
+  }
+}
 
-  // Handle cases of screen coordinates != from framebuffer coordinates (e.g.
-  // retina displays).
+void ImGuiDrawer::SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer) {
+  if (immediate_drawer_ == new_immediate_drawer) {
+    return;
+  }
+  if (immediate_drawer_) {
+    GetIO().Fonts->TexID = static_cast<ImTextureID>(nullptr);
+    font_texture_.reset();
+  }
+  immediate_drawer_ = new_immediate_drawer;
+  if (immediate_drawer_) {
+    SetupFontTexture();
+  }
+}
+
+void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+  // Drawing of anything is initiated by the presenter.
+  assert_not_null(presenter_);
+  if (!immediate_drawer_) {
+    // A presenter has been attached, but an immediate drawer hasn't been
+    // attached yet.
+    return;
+  }
+
+  if (dialogs_.empty()) {
+    return;
+  }
+
+  ImGui::SetCurrentContext(internal_state_);
+
   ImGuiIO& io = ImGui::GetIO();
-  float fb_height = io.DisplaySize.y * io.DisplayFramebufferScale.y;
-  data->ScaleClipRects(io.DisplayFramebufferScale);
 
-  const float width = io.DisplaySize.x;
-  const float height = io.DisplaySize.y;
-  drawer->Begin(static_cast<int>(width), static_cast<int>(height));
+  uint64_t current_frame_time_ticks = Clock::QueryHostTickCount();
+  io.DeltaTime =
+      float(double(current_frame_time_ticks - last_frame_time_ticks_) /
+            frame_time_tick_frequency_);
+  if (!(io.DeltaTime > 0.0f) ||
+      current_frame_time_ticks < last_frame_time_ticks_) {
+    // For safety as Dear ImGui doesn't allow non-positive DeltaTime. Using the
+    // same default value as in the official samples.
+    io.DeltaTime = 1.0f / 60.0f;
+  }
+  last_frame_time_ticks_ = current_frame_time_ticks;
+
+  float physical_to_logical =
+      float(window_->GetMediumDpi()) / float(window_->GetDpi());
+  io.DisplaySize.x = window_->GetActualPhysicalWidth() * physical_to_logical;
+  io.DisplaySize.y = window_->GetActualPhysicalHeight() * physical_to_logical;
+
+  ImGui::NewFrame();
+
+  assert_true(!IsDrawingDialogs());
+  dialog_loop_next_index_ = 0;
+  while (dialog_loop_next_index_ < dialogs_.size()) {
+    dialogs_[dialog_loop_next_index_++]->Draw();
+  }
+  dialog_loop_next_index_ = SIZE_MAX;
+
+  ImGui::Render();
+  ImDrawData* draw_data = ImGui::GetDrawData();
+  if (draw_data) {
+    RenderDrawLists(draw_data, ui_draw_context);
+  }
+
+  if (reset_mouse_position_after_next_frame_) {
+    reset_mouse_position_after_next_frame_ = false;
+    io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
+  }
+
+  // Detaching is deferred if the last dialog is removed during drawing, perform
+  // it now if needed.
+  DetachIfLastDialogRemoved();
+
+  if (!dialogs_.empty()) {
+    // Repaint (and handle input) continuously if still active.
+    presenter_->RequestUIPaintFromUIThread();
+  }
+}
+
+void ImGuiDrawer::RenderDrawLists(ImDrawData* data,
+                                  UIDrawContext& ui_draw_context) {
+  ImGuiIO& io = ImGui::GetIO();
+
+  immediate_drawer_->Begin(ui_draw_context, io.DisplaySize.x, io.DisplaySize.y);
 
   for (int i = 0; i < data->CmdListsCount; ++i) {
     const auto cmd_list = data->CmdLists[i];
@@ -188,31 +343,28 @@ void ImGuiDrawer::RenderDrawLists(ImDrawData* data) {
     batch.vertex_count = cmd_list->VtxBuffer.size();
     batch.indices = cmd_list->IdxBuffer.Data;
     batch.index_count = cmd_list->IdxBuffer.size();
-    drawer->BeginDrawBatch(batch);
+    immediate_drawer_->BeginDrawBatch(batch);
 
-    int index_offset = 0;
     for (int j = 0; j < cmd_list->CmdBuffer.size(); ++j) {
       const auto& cmd = cmd_list->CmdBuffer[j];
 
       ImmediateDraw draw;
       draw.primitive_type = ImmediatePrimitiveType::kTriangles;
       draw.count = cmd.ElemCount;
-      draw.index_offset = index_offset;
+      draw.index_offset = cmd.IdxOffset;
       draw.texture = reinterpret_cast<ImmediateTexture*>(cmd.TextureId);
       draw.scissor = true;
-      draw.scissor_rect[0] = static_cast<int>(cmd.ClipRect.x);
-      draw.scissor_rect[1] = static_cast<int>(height - cmd.ClipRect.w);
-      draw.scissor_rect[2] = static_cast<int>(cmd.ClipRect.z - cmd.ClipRect.x);
-      draw.scissor_rect[3] = static_cast<int>(cmd.ClipRect.w - cmd.ClipRect.y);
-      drawer->Draw(draw);
-
-      index_offset += cmd.ElemCount;
+      draw.scissor_left = cmd.ClipRect.x;
+      draw.scissor_top = cmd.ClipRect.y;
+      draw.scissor_right = cmd.ClipRect.z;
+      draw.scissor_bottom = cmd.ClipRect.w;
+      immediate_drawer_->Draw(draw);
     }
 
-    drawer->EndDrawBatch();
+    immediate_drawer_->EndDrawBatch();
   }
 
-  drawer->End();
+  immediate_drawer_->End();
 }
 
 ImGuiIO& ImGuiDrawer::GetIO() {
@@ -220,53 +372,25 @@ ImGuiIO& ImGuiDrawer::GetIO() {
   return ImGui::GetIO();
 }
 
-void ImGuiDrawer::RenderDrawLists() {
-  ImGui::SetCurrentContext(internal_state_);
-  auto draw_data = ImGui::GetDrawData();
-  if (draw_data) {
-    RenderDrawLists(draw_data);
+void ImGuiDrawer::OnKeyDown(KeyEvent& e) { OnKey(e, true); }
+
+void ImGuiDrawer::OnKeyUp(KeyEvent& e) { OnKey(e, false); }
+
+void ImGuiDrawer::OnKeyChar(KeyEvent& e) {
+  auto& io = GetIO();
+  // TODO(Triang3l): Accept the Unicode character.
+  unsigned int character = static_cast<unsigned int>(e.virtual_key());
+  if (character > 0 && character < 0x10000) {
+    io.AddInputCharacter(character);
+    e.set_handled(true);
   }
 }
 
-void ImGuiDrawer::OnKeyDown(KeyEvent* e) {
+void ImGuiDrawer::OnMouseDown(MouseEvent& e) {
+  SwitchToPhysicalMouseAndUpdateMousePosition(e);
   auto& io = GetIO();
-  io.KeysDown[e->key_code()] = true;
-  switch (e->key_code()) {
-    case 16: {
-      io.KeyShift = true;
-    } break;
-    case 17: {
-      io.KeyCtrl = true;
-    } break;
-  }
-}
-
-void ImGuiDrawer::OnKeyUp(KeyEvent* e) {
-  auto& io = GetIO();
-  io.KeysDown[e->key_code()] = false;
-  switch (e->key_code()) {
-    case 16: {
-      io.KeyShift = false;
-    } break;
-    case 17: {
-      io.KeyCtrl = false;
-    } break;
-  }
-}
-
-void ImGuiDrawer::OnKeyChar(KeyEvent* e) {
-  auto& io = GetIO();
-  if (e->key_code() > 0 && e->key_code() < 0x10000) {
-    io.AddInputCharacter(e->key_code());
-    e->set_handled(true);
-  }
-}
-
-void ImGuiDrawer::OnMouseDown(MouseEvent* e) {
-  auto& io = GetIO();
-  io.MousePos = ImVec2(float(e->x()), float(e->y()));
   int button = -1;
-  switch (e->button()) {
+  switch (e.button()) {
     case xe::ui::MouseEvent::Button::kLeft: {
       button = 0;
       break;
@@ -280,25 +404,25 @@ void ImGuiDrawer::OnMouseDown(MouseEvent* e) {
       break;
     }
   }
-
   if (button >= 0 && button < std::size(io.MouseDown)) {
-    if (!ImGui::IsAnyMouseDown()) {
-      window_->CaptureMouse();
+    if (!io.MouseDown[button]) {
+      if (!ImGui::IsAnyMouseDown()) {
+        window_->CaptureMouse();
+      }
+      io.MouseDown[button] = true;
     }
-    io.MouseDown[button] = true;
   }
 }
 
-void ImGuiDrawer::OnMouseMove(MouseEvent* e) {
-  auto& io = GetIO();
-  io.MousePos = ImVec2(float(e->x()), float(e->y()));
+void ImGuiDrawer::OnMouseMove(MouseEvent& e) {
+  SwitchToPhysicalMouseAndUpdateMousePosition(e);
 }
 
-void ImGuiDrawer::OnMouseUp(MouseEvent* e) {
+void ImGuiDrawer::OnMouseUp(MouseEvent& e) {
+  SwitchToPhysicalMouseAndUpdateMousePosition(e);
   auto& io = GetIO();
-  io.MousePos = ImVec2(float(e->x()), float(e->y()));
   int button = -1;
-  switch (e->button()) {
+  switch (e.button()) {
     case xe::ui::MouseEvent::Button::kLeft: {
       button = 0;
       break;
@@ -312,19 +436,134 @@ void ImGuiDrawer::OnMouseUp(MouseEvent* e) {
       break;
     }
   }
-
   if (button >= 0 && button < std::size(io.MouseDown)) {
-    io.MouseDown[button] = false;
-    if (!ImGui::IsAnyMouseDown()) {
-      window_->ReleaseMouse();
+    if (io.MouseDown[button]) {
+      io.MouseDown[button] = false;
+      if (!ImGui::IsAnyMouseDown()) {
+        window_->ReleaseMouse();
+      }
     }
   }
 }
 
-void ImGuiDrawer::OnMouseWheel(MouseEvent* e) {
+void ImGuiDrawer::OnMouseWheel(MouseEvent& e) {
+  SwitchToPhysicalMouseAndUpdateMousePosition(e);
   auto& io = GetIO();
-  io.MousePos = ImVec2(float(e->x()), float(e->y()));
-  io.MouseWheel += float(e->dy() / 120.0f);
+  io.MouseWheel += float(e.scroll_y()) / float(MouseEvent::kScrollPerDetent);
+}
+
+void ImGuiDrawer::OnTouchEvent(TouchEvent& e) {
+  auto& io = GetIO();
+  TouchEvent::Action action = e.action();
+  uint32_t pointer_id = e.pointer_id();
+  if (action == TouchEvent::Action::kDown) {
+    // The latest pointer needs to be controlling the ImGui mouse.
+    if (touch_pointer_id_ == TouchEvent::kPointerIDNone) {
+      // Switching from the mouse to touch input.
+      if (ImGui::IsAnyMouseDown()) {
+        std::memset(io.MouseDown, 0, sizeof(io.MouseDown));
+        window_->ReleaseMouse();
+      }
+    }
+    touch_pointer_id_ = pointer_id;
+  } else {
+    if (pointer_id != touch_pointer_id_) {
+      return;
+    }
+  }
+  UpdateMousePosition(e.x(), e.y());
+  if (action == TouchEvent::Action::kUp ||
+      action == TouchEvent::Action::kCancel) {
+    io.MouseDown[0] = false;
+    touch_pointer_id_ = TouchEvent::kPointerIDNone;
+    // Make sure that after a touch, the ImGui mouse isn't hovering over
+    // anything.
+    reset_mouse_position_after_next_frame_ = true;
+  } else {
+    io.MouseDown[0] = true;
+    reset_mouse_position_after_next_frame_ = false;
+  }
+}
+
+void ImGuiDrawer::ClearInput() {
+  auto& io = GetIO();
+  if (touch_pointer_id_ == TouchEvent::kPointerIDNone &&
+      ImGui::IsAnyMouseDown()) {
+    window_->ReleaseMouse();
+  }
+  io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
+  std::memset(io.MouseDown, 0, sizeof(io.MouseDown));
+  io.ClearInputKeys();
+  io.ClearInputCharacters();
+  touch_pointer_id_ = TouchEvent::kPointerIDNone;
+  reset_mouse_position_after_next_frame_ = false;
+}
+
+void ImGuiDrawer::OnKey(KeyEvent& e, bool is_down) {
+  auto& io = GetIO();
+  const VirtualKey virtual_key = e.virtual_key();
+  if (auto imGuiKey = VirtualKeyToImGuiKey(virtual_key); imGuiKey) {
+    io.AddKeyEvent(*imGuiKey, is_down);
+  }
+  switch (virtual_key) {
+    case VirtualKey::kShift:
+      io.KeyShift = is_down;
+      break;
+    case VirtualKey::kControl:
+      io.KeyCtrl = is_down;
+      break;
+    case VirtualKey::kMenu:
+      // FIXME(Triang3l): Doesn't work in xenia-ui-window-demo.
+      io.KeyAlt = is_down;
+      break;
+    case VirtualKey::kLWin:
+      io.KeySuper = is_down;
+      break;
+    default:
+      break;
+  }
+}
+
+void ImGuiDrawer::UpdateMousePosition(float x, float y) {
+  auto& io = GetIO();
+  float physical_to_logical =
+      float(window_->GetMediumDpi()) / float(window_->GetDpi());
+  io.MousePos.x = x * physical_to_logical;
+  io.MousePos.y = y * physical_to_logical;
+}
+
+void ImGuiDrawer::SwitchToPhysicalMouseAndUpdateMousePosition(
+    const MouseEvent& e) {
+  if (touch_pointer_id_ != TouchEvent::kPointerIDNone) {
+    touch_pointer_id_ = TouchEvent::kPointerIDNone;
+    auto& io = GetIO();
+    std::memset(io.MouseDown, 0, sizeof(io.MouseDown));
+    // Nothing needs to be done regarding CaptureMouse and ReleaseMouse - all
+    // buttons as well as mouse capture have been released when switching to
+    // touch input, the mouse is never captured during touch input, and now
+    // resetting to no buttons down (therefore not capturing).
+  }
+  reset_mouse_position_after_next_frame_ = false;
+  UpdateMousePosition(float(e.x()), float(e.y()));
+}
+
+void ImGuiDrawer::DetachIfLastDialogRemoved() {
+  // IsDrawingDialogs() is also checked because in a situation of removing the
+  // only dialog, then adding a dialog, from within a dialog's Draw function,
+  // re-registering the ImGuiDrawer may result in ImGui being drawn multiple
+  // times in the current frame.
+  if (!dialogs_.empty() || IsDrawingDialogs()) {
+    return;
+  }
+  if (presenter_) {
+    presenter_->RemoveUIDrawerFromUIThread(this);
+  }
+  window_->RemoveInputListener(this);
+  // Clear all input since no input will be received anymore, and when the
+  // drawer becomes active again, it'd have an outdated input state otherwise
+  // which will be persistent until new events actualize individual input
+  // properties.
+  ClearInput();
 }
 
 }  // namespace ui

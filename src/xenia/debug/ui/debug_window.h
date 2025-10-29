@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2015 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -13,14 +13,18 @@
 #include <memory>
 #include <vector>
 
-#include "xenia/base/x64_context.h"
+#include "xenia/base/host_thread_context.h"
 #include "xenia/cpu/breakpoint.h"
 #include "xenia/cpu/debug_listener.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/emulator.h"
-#include "xenia/ui/loop.h"
+#include "xenia/ui/imgui_dialog.h"
+#include "xenia/ui/imgui_drawer.h"
+#include "xenia/ui/immediate_drawer.h"
 #include "xenia/ui/menu_item.h"
+#include "xenia/ui/presenter.h"
 #include "xenia/ui/window.h"
+#include "xenia/ui/windowed_app_context.h"
 #include "xenia/xbox.h"
 
 namespace xe {
@@ -31,11 +35,11 @@ class DebugWindow : public cpu::DebugListener {
  public:
   ~DebugWindow();
 
-  static std::unique_ptr<DebugWindow> Create(Emulator* emulator,
-                                             xe::ui::Loop* loop);
+  static std::unique_ptr<DebugWindow> Create(
+      Emulator* emulator, xe::ui::WindowedAppContext& app_context);
 
   Emulator* emulator() const { return emulator_; }
-  xe::ui::Loop* loop() const { return loop_; }
+  xe::ui::WindowedAppContext& app_context() const { return app_context_; }
   xe::ui::Window* window() const { return window_.get(); }
 
   void OnFocus() override;
@@ -48,10 +52,24 @@ class DebugWindow : public cpu::DebugListener {
                        cpu::ThreadDebugInfo* thread_info) override;
 
  private:
-  explicit DebugWindow(Emulator* emulator, xe::ui::Loop* loop);
+  class DebugDialog final : public xe::ui::ImGuiDialog {
+   public:
+    explicit DebugDialog(xe::ui::ImGuiDrawer* imgui_drawer,
+                         DebugWindow& debug_window)
+        : xe::ui::ImGuiDialog(imgui_drawer), debug_window_(debug_window) {}
+
+   protected:
+    void OnDraw(ImGuiIO& io) override;
+
+   private:
+    DebugWindow& debug_window_;
+  };
+
+  explicit DebugWindow(Emulator* emulator,
+                       xe::ui::WindowedAppContext& app_context);
   bool Initialize();
 
-  void DrawFrame();
+  void DrawFrame(ImGuiIO& io);
   void DrawToolbar();
   void DrawFunctionsPane();
   void DrawSourcePane();
@@ -86,11 +104,16 @@ class DebugWindow : public cpu::DebugListener {
   cpu::Breakpoint* LookupBreakpointAtAddress(
       cpu::Breakpoint::AddressType address_type, uint64_t address);
 
+  void Focus() const;
+
   Emulator* emulator_ = nullptr;
   cpu::Processor* processor_ = nullptr;
-  xe::ui::Loop* loop_ = nullptr;
+  xe::ui::WindowedAppContext& app_context_;
   std::unique_ptr<xe::ui::Window> window_;
-  uint64_t last_draw_tick_count_ = 0;
+  std::unique_ptr<xe::ui::Presenter> presenter_;
+  std::unique_ptr<xe::ui::ImmediateDrawer> immediate_drawer_;
+  std::unique_ptr<xe::ui::ImGuiDrawer> imgui_drawer_;
+  std::unique_ptr<DebugDialog> debug_dialog_;
 
   uintptr_t capstone_handle_ = 0;
 

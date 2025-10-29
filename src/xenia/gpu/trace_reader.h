@@ -10,7 +10,7 @@
 #ifndef XENIA_GPU_TRACE_READER_H_
 #define XENIA_GPU_TRACE_READER_H_
 
-#include <string>
+#include <string_view>
 #include <vector>
 
 #include "xenia/base/mapped_memory.h"
@@ -19,36 +19,6 @@
 
 namespace xe {
 namespace gpu {
-
-// void Foo() {
-//  auto trace_ptr = trace_data;
-//  while (trace_ptr < trace_data + trace_size) {
-//    auto cmd_type = *reinterpret_cast<const TraceCommandType*>(trace_ptr);
-//    switch (cmd_type) {
-//      case TraceCommandType::kPrimaryBufferStart:
-//        break;
-//      case TraceCommandType::kPrimaryBufferEnd:
-//        break;
-//      case TraceCommandType::kIndirectBufferStart:
-//        break;
-//      case TraceCommandType::kIndirectBufferEnd:
-//        break;
-//      case TraceCommandType::kPacketStart:
-//        break;
-//      case TraceCommandType::kPacketEnd:
-//        break;
-//      case TraceCommandType::kMemoryRead:
-//        break;
-//      case TraceCommandType::kMemoryWrite:
-//        break;
-//      case TraceCommandType::kEvent:
-//        break;
-//    }
-//    /*trace_ptr = graphics_system->PlayTrace(
-//    trace_ptr, trace_size - (trace_ptr - trace_data),
-//    GraphicsSystem::TracePlaybackMode::kBreakOnSwap);*/
-//  }
-//}
 
 class TraceReader {
  public:
@@ -129,15 +99,14 @@ class TraceReader {
   const Frame* frame(int n) const { return &frames_[n]; }
   int frame_count() const { return int(frames_.size()); }
 
-  bool Open(const std::filesystem::path& path);
+  bool Open(const std::string_view path);
 
   void Close();
 
  protected:
   void ParseTrace();
-  bool DecompressMemory(MemoryEncodingFormat encoding_format,
-                        const uint8_t* src, size_t src_size, uint8_t* dest,
-                        size_t dest_size);
+  bool DecompressMemory(MemoryEncodingFormat encoding_format, const void* src,
+                        size_t src_size, void* dest, size_t dest_size);
 
   std::unique_ptr<MappedMemory> mmap_;
   const uint8_t* trace_data_ = nullptr;

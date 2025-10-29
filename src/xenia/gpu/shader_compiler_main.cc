@@ -9,20 +9,24 @@
 
 #include <cinttypes>
 #include <cstring>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "third_party/glslang/SPIRV/disassemble.h"
 #include "xenia/base/assert.h"
+#include "xenia/base/console_app_main.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
-#include "xenia/base/main.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/string.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
 #include "xenia/gpu/shader_translator.h"
 #include "xenia/gpu/spirv_shader_translator.h"
-#include "xenia/ui/spirv/spirv_disassembler.h"
+#include "xenia/gpu/xenos.h"
+#include "xenia/ui/vulkan/spirv_tools_context.h"
 
 // For D3DDisassemble:
 #if XE_PLATFORM_WIN32
@@ -33,6 +37,11 @@ DEFINE_path(shader_input, "", "Input shader binary file path.", "GPU");
 DEFINE_string(shader_input_type, "",
               "'vs', 'ps', or unspecified to infer from the given filename.",
               "GPU");
+DEFINE_bool(
+    shader_input_little_endian, false,
+    "Whether the input shader binary is little-endian (from an Arm device with "
+    "the Qualcomm Adreno 200, for instance).",
+    "GPU");
 DEFINE_path(shader_output, "", "Output shader file path.", "GPU");
 DEFINE_string(shader_output_type, "ucode",
               "Translator to use: [ucode, spirv, spirvtext, dxbc, dxbctext].",
@@ -45,9 +54,11 @@ DEFINE_string(
     "GPU");
 DEFINE_bool(shader_output_bindless_resources, false,
             "Output host shader with bindless resources used.", "GPU");
-DEFINE_bool(shader_output_dxbc_rov, false,
-            "Output ROV-based output-merger code in DXBC pixel shaders.",
-            "GPU");
+DEFINE_bool(
+    shader_output_pixel_shader_interlock, false,
+    "Output host shader with a render backend implementation based on pixel "
+    "shader interlock.",
+    "GPU");
 
 namespace xe {
 namespace gpu {
@@ -104,20 +115,26 @@ int shader_compiler_main(const std::vector<std::string>& args) {
   // TODO(benvanik): hash? need to return the data to big-endian format first.
   uint64_t ucode_data_hash = 0;
   auto shader = std::make_unique<Shader>(
-      shader_type, ucode_data_hash, ucode_dwords.data(), ucode_dwords.size());
+      shader_type, ucode_data_hash, ucode_dwords.data(), ucode_dwords.size(),
+      cvars::shader_input_little_endian ? std::endian::little
+                                        : std::endian::big);
 
   StringBuffer ucode_disasm_buffer;
   shader->AnalyzeUcode(ucode_disasm_buffer);
 
   std::unique_ptr<ShaderTranslator> translator;
+  SpirvShaderTranslator::Features spirv_features(true);
   if (cvars::shader_output_type == "spirv" ||
       cvars::shader_output_type == "spirvtext") {
-    translator = std::make_unique<SpirvShaderTranslator>();
+    translator = std::make_unique<SpirvShaderTranslator>(
+        spirv_features, true, true,
+        cvars::shader_output_pixel_shader_interlock);
   } else if (cvars::shader_output_type == "dxbc" ||
              cvars::shader_output_type == "dxbctext") {
     translator = std::make_unique<DxbcShaderTranslator>(
         ui::GraphicsProvider::GpuVendorID(0),
-        cvars::shader_output_bindless_resources, cvars::shader_output_dxbc_rov);
+        cvars::shader_output_bindless_resources,
+        cvars::shader_output_pixel_shader_interlock);
   } else {
     // Just output microcode disassembly generated during microcode information
     // gathering.
@@ -157,10 +174,11 @@ int shader_compiler_main(const std::vector<std::string>& args) {
   switch (shader_type) {
     case xenos::ShaderType::kVertex:
       modification = translator->GetDefaultVertexShaderModification(
-          64, host_vertex_shader_type);
+          xenos::kMaxShaderTempRegisters, host_vertex_shader_type);
       break;
     case xenos::ShaderType::kPixel:
-      modification = translator->GetDefaultPixelShaderModification(64);
+      modification = translator->GetDefaultPixelShaderModification(
+          xenos::kMaxShaderTempRegisters);
       break;
     default:
       assert_unhandled_case(shader_type);
@@ -174,13 +192,30 @@ int shader_compiler_main(const std::vector<std::string>& args) {
   const void* source_data = translation->translated_binary().data();
   size_t source_data_size = translation->translated_binary().size();
 
-  std::unique_ptr<xe::ui::spirv::SpirvDisassembler::Result> spirv_disasm_result;
+  std::string spirv_disasm;
   if (cvars::shader_output_type == "spirvtext") {
-    // Disassemble SPIRV.
-    spirv_disasm_result = xe::ui::spirv::SpirvDisassembler().Disassemble(
-        reinterpret_cast<const uint32_t*>(source_data), source_data_size / 4);
-    source_data = spirv_disasm_result->text();
-    source_data_size = std::strlen(spirv_disasm_result->text()) + 1;
+    std::ostringstream spirv_disasm_stream;
+    std::vector<unsigned int> spirv_source;
+    spirv_source.reserve(source_data_size / sizeof(unsigned int));
+    spirv_source.insert(spirv_source.cend(),
+                        reinterpret_cast<const unsigned int*>(source_data),
+                        reinterpret_cast<const unsigned int*>(source_data) +
+                            source_data_size / sizeof(unsigned int));
+    spv::Disassemble(spirv_disasm_stream, spirv_source);
+    spirv_disasm = std::move(spirv_disasm_stream.str());
+    ui::vulkan::SpirvToolsContext spirv_tools_context;
+    if (spirv_tools_context.Initialize(spirv_features.spirv_version)) {
+      std::string spirv_validation_error;
+      spirv_tools_context.Validate(
+          reinterpret_cast<const uint32_t*>(spirv_source.data()),
+          spirv_source.size(), &spirv_validation_error);
+      if (!spirv_validation_error.empty()) {
+        spirv_disasm.append(1, '\n');
+        spirv_disasm.append(spirv_validation_error);
+      }
+    }
+    source_data = spirv_disasm.c_str();
+    source_data_size = spirv_disasm.size();
   }
 #if XE_PLATFORM_WIN32
   ID3DBlob* dxbc_disasm_blob = nullptr;
@@ -229,5 +264,6 @@ int shader_compiler_main(const std::vector<std::string>& args) {
 }  // namespace gpu
 }  // namespace xe
 
-DEFINE_ENTRY_POINT("xenia-gpu-shader-compiler", xe::gpu::shader_compiler_main,
-                   "shader.bin", "shader_input");
+XE_DEFINE_CONSOLE_APP("xenia-gpu-shader-compiler",
+                      xe::gpu::shader_compiler_main, "shader.bin",
+                      "shader_input");

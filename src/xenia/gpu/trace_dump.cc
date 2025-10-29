@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -10,6 +10,7 @@
 #include "xenia/gpu/trace_dump.h"
 
 #include "third_party/stb/stb_image_write.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/string.h"
@@ -18,6 +19,7 @@
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/memory.h"
 #include "xenia/ui/file_picker.h"
+#include "xenia/ui/presenter.h"
 #include "xenia/ui/window.h"
 #include "xenia/xbox.h"
 
@@ -94,20 +96,21 @@ bool TraceDump::Setup() {
   // Create the emulator but don't initialize so we can setup the window.
   emulator_ = std::make_unique<Emulator>("", "", "", "");
   X_STATUS result = emulator_->Setup(
-      nullptr, nullptr, [this]() { return CreateGraphicsSystem(); }, nullptr);
+      nullptr, nullptr, false, nullptr,
+      [this]() { return CreateGraphicsSystem(); }, nullptr);
   if (XFAILED(result)) {
     XELOGE("Failed to setup emulator: {:08X}", result);
     return false;
   }
   graphics_system_ = emulator_->graphics_system();
-  player_ = std::make_unique<TracePlayer>(nullptr, graphics_system_);
+  player_ = std::make_unique<TracePlayer>(graphics_system_);
   return true;
 }
 
 bool TraceDump::Load(const std::filesystem::path& trace_file_path) {
   trace_file_path_ = trace_file_path;
 
-  if (!player_->Open(trace_file_path_)) {
+  if (!player_->Open(xe::path_to_utf8(trace_file_path_))) {
     XELOGE("Could not load trace file");
     return false;
   }
@@ -125,18 +128,19 @@ int TraceDump::Run() {
 
   // Capture.
   int result = 0;
-  auto raw_image = graphics_system_->Capture();
-  if (raw_image) {
+  ui::Presenter* presenter = graphics_system_->presenter();
+  ui::RawImage raw_image;
+  if (presenter && presenter->CaptureGuestOutput(raw_image)) {
     // Save framebuffer png.
     auto png_path = base_output_path_.replace_extension(".png");
     auto handle = filesystem::OpenFile(png_path, "wb");
     auto callback = [](void* context, void* data, int size) {
       fwrite(data, 1, size, (FILE*)context);
     };
-    stbi_write_png_to_func(callback, handle, static_cast<int>(raw_image->width),
-                           static_cast<int>(raw_image->height), 4,
-                           raw_image->data.data(),
-                           static_cast<int>(raw_image->stride));
+    stbi_write_png_to_func(callback, handle, static_cast<int>(raw_image.width),
+                           static_cast<int>(raw_image.height), 4,
+                           raw_image.data.data(),
+                           static_cast<int>(raw_image.stride));
     fclose(handle);
   } else {
     result = 1;

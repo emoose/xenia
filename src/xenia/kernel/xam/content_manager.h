@@ -47,6 +47,11 @@ namespace xe {
 namespace kernel {
 namespace xam {
 
+// If set in XCONTENT_AGGREGATE_DATA, will be substituted with the running
+// titles ID
+// TODO: check if actual x360 kernel/xam has a value similar to this
+constexpr uint32_t kCurrentlyRunningTitleId = 0xFFFFFFFF;
+
 struct XCONTENT_DATA {
   be<uint32_t> device_id;
   be<XContentType> content_type;
@@ -101,11 +106,22 @@ struct XCONTENT_DATA {
     padding[0] = padding[1] = 0;
   }
 };
-static_assert_size(XCONTENT_DATA, 308);
+static_assert_size(XCONTENT_DATA, 0x134);
 
 struct XCONTENT_AGGREGATE_DATA : XCONTENT_DATA {
-  be<uint64_t> unk134;  // XUID?
+  be<uint64_t> unk134;  // some titles store XUID here?
   be<uint32_t> title_id;
+
+  XCONTENT_AGGREGATE_DATA() = default;
+  XCONTENT_AGGREGATE_DATA(const XCONTENT_DATA& other) {
+    device_id = other.device_id;
+    content_type = other.content_type;
+    set_display_name(other.display_name());
+    set_file_name(other.file_name());
+    padding[0] = padding[1] = 0;
+    unk134 = 0;
+    title_id = kCurrentlyRunningTitleId;
+  }
 
   bool operator==(const XCONTENT_AGGREGATE_DATA& other) const {
     // Package is located via device_id/title_id/content_type/file_name, so only
@@ -166,6 +182,7 @@ class ContentManager {
   X_RESULT DeleteContent(const XCONTENT_AGGREGATE_DATA& data);
   std::filesystem::path ResolveGameUserContentPath();
   bool IsContentOpen(const XCONTENT_AGGREGATE_DATA& data) const;
+  void CloseOpenedFilesFromContent(const std::string_view root_name);
 
  private:
   std::filesystem::path ResolvePackageRoot(XContentType content_type,

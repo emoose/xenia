@@ -16,6 +16,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/mapped_memory.h"
 #include "xenia/base/math.h"
+#include "xenia/base/platform.h"
 #include "xenia/gpu/packet_disassembler.h"
 #include "xenia/gpu/trace_protocol.h"
 #include "xenia/memory.h"
@@ -23,10 +24,19 @@
 namespace xe {
 namespace gpu {
 
-bool TraceReader::Open(const std::filesystem::path& path) {
+bool TraceReader::Open(const std::string_view path) {
   Close();
 
-  mmap_ = MappedMemory::Open(path, MappedMemory::Mode::kRead);
+  mmap_.reset();
+#if XE_PLATFORM_ANDROID
+  if (xe::filesystem::IsAndroidContentUri(path)) {
+    mmap_ =
+        MappedMemory::OpenForAndroidContentUri(path, MappedMemory::Mode::kRead);
+  }
+#endif  // XE_PLATFORM_ANDROID
+  if (!mmap_) {
+    mmap_ = MappedMemory::Open(xe::to_path(path), MappedMemory::Mode::kRead);
+  }
   if (!mmap_) {
     return false;
   }
@@ -205,6 +215,16 @@ void TraceReader::ParseTrace() {
         }
         break;
       }
+      case TraceCommandType::kRegisters: {
+        auto cmd = reinterpret_cast<const RegistersCommand*>(trace_ptr);
+        trace_ptr += sizeof(*cmd) + cmd->encoded_length;
+        break;
+      }
+      case TraceCommandType::kGammaRamp: {
+        auto cmd = reinterpret_cast<const GammaRampCommand*>(trace_ptr);
+        trace_ptr += sizeof(*cmd) + cmd->encoded_length;
+        break;
+      }
       default:
         // Broken trace file?
         assert_unhandled_case(type);
@@ -218,8 +238,8 @@ void TraceReader::ParseTrace() {
 }
 
 bool TraceReader::DecompressMemory(MemoryEncodingFormat encoding_format,
-                                   const uint8_t* src, size_t src_size,
-                                   uint8_t* dest, size_t dest_size) {
+                                   const void* src, size_t src_size, void* dest,
+                                   size_t dest_size) {
   switch (encoding_format) {
     case MemoryEncodingFormat::kNone:
       assert_true(src_size == dest_size);

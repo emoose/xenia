@@ -2,13 +2,15 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
+#include <memory>
+#include <string>
+
 #include "xenia/base/logging.h"
-#include "xenia/base/main.h"
 #include "xenia/gpu/trace_viewer.h"
 #include "xenia/gpu/vulkan/vulkan_command_processor.h"
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
@@ -17,10 +19,13 @@ namespace xe {
 namespace gpu {
 namespace vulkan {
 
-using namespace xe::gpu::xenos;
-
-class VulkanTraceViewer : public TraceViewer {
+class VulkanTraceViewer final : public TraceViewer {
  public:
+  static std::unique_ptr<WindowedApp> Create(
+      xe::ui::WindowedAppContext& app_context) {
+    return std::unique_ptr<WindowedApp>(new VulkanTraceViewer(app_context));
+  }
+
   std::unique_ptr<gpu::GraphicsSystem> CreateGraphicsSystem() override {
     return std::unique_ptr<gpu::GraphicsSystem>(new VulkanGraphicsSystem());
   }
@@ -28,49 +33,32 @@ class VulkanTraceViewer : public TraceViewer {
   uintptr_t GetColorRenderTarget(
       uint32_t pitch, xenos::MsaaSamples samples, uint32_t base,
       xenos::ColorRenderTargetFormat format) override {
-    auto command_processor = static_cast<VulkanCommandProcessor*>(
-        graphics_system_->command_processor());
-    // return command_processor->GetColorRenderTarget(pitch, samples, base,
-    //                                               format);
+    // TODO(Triang3l): EDRAM viewer.
     return 0;
   }
 
   uintptr_t GetDepthRenderTarget(
       uint32_t pitch, xenos::MsaaSamples samples, uint32_t base,
       xenos::DepthRenderTargetFormat format) override {
-    auto command_processor = static_cast<VulkanCommandProcessor*>(
-        graphics_system_->command_processor());
-    // return command_processor->GetDepthRenderTarget(pitch, samples, base,
-    //                                               format);
+    // TODO(Triang3l): EDRAM viewer.
     return 0;
   }
 
   uintptr_t GetTextureEntry(const TextureInfo& texture_info,
                             const SamplerInfo& sampler_info) override {
-    auto command_processor = static_cast<VulkanCommandProcessor*>(
-        graphics_system_->command_processor());
-
-    // auto entry_view =
-    //    command_processor->texture_cache()->Demand(texture_info,
-    //    sampler_info);
-    // if (!entry_view) {
-    //  return 0;
-    //}
-    // auto texture = entry_view->texture;
-    // return static_cast<uintptr_t>(texture->handle);
+    // TODO(Triang3l): Textures, but from a fetch constant rather than
+    // TextureInfo/SamplerInfo which are going away.
     return 0;
   }
-};
 
-int trace_viewer_main(const std::vector<std::string>& args) {
-  VulkanTraceViewer trace_viewer;
-  return trace_viewer.Main(args);
-}
+ private:
+  explicit VulkanTraceViewer(xe::ui::WindowedAppContext& app_context)
+      : TraceViewer(app_context, "xenia-gpu-vulkan-trace-viewer") {}
+};
 
 }  // namespace vulkan
 }  // namespace gpu
 }  // namespace xe
 
-DEFINE_ENTRY_POINT("xenia-gpu-vulkan-trace-viewer",
-                   xe::gpu::vulkan::trace_viewer_main, "some.trace",
-                   "target_trace_file");
+XE_DEFINE_WINDOWED_APP(xenia_gpu_vulkan_trace_viewer,
+                       xe::gpu::vulkan::VulkanTraceViewer::Create);

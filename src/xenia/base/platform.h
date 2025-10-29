@@ -67,9 +67,6 @@
 #endif
 
 #if XE_PLATFORM_WIN32
-#define strdup _strdup
-#define strcasecmp _stricmp
-#define strncasecmp _strnicmp
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX  // Don't want windows.h including min/max macros.
 #endif            // XE_PLATFORM_WIN32
@@ -85,17 +82,16 @@
 #endif  // XE_PLATFORM_MAC
 
 #if XE_COMPILER_MSVC
-#define XEPACKEDSTRUCT(name, value) \
-  __pragma(pack(push, 1)) struct name value __pragma(pack(pop));
-#define XEPACKEDSTRUCTANONYMOUS(value) \
-  __pragma(pack(push, 1)) struct value __pragma(pack(pop));
-#define XEPACKEDUNION(name, value) \
-  __pragma(pack(push, 1)) union name value __pragma(pack(pop));
+#define _XEPACKEDSCOPE(body) __pragma(pack(push, 1)) body __pragma(pack(pop));
 #else
-#define XEPACKEDSTRUCT(name, value) struct __attribute__((packed)) name value;
-#define XEPACKEDSTRUCTANONYMOUS(value) struct __attribute__((packed)) value;
-#define XEPACKEDUNION(name, value) union __attribute__((packed)) name value;
+#define _XEPACKEDSCOPE(body)     \
+  _Pragma("pack(push, 1)") body; \
+  _Pragma("pack(pop)");
 #endif  // XE_PLATFORM_WIN32
+
+#define XEPACKEDSTRUCT(name, value) _XEPACKEDSCOPE(struct name value)
+#define XEPACKEDSTRUCTANONYMOUS(value) _XEPACKEDSCOPE(struct value)
+#define XEPACKEDUNION(name, value) _XEPACKEDSCOPE(union name value)
 
 namespace xe {
 

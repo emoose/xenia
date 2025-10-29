@@ -11,6 +11,10 @@
 #include "xenia/base/platform_win.h"
 #include "xenia/base/string.h"
 #include "xenia/ui/file_picker.h"
+#include "xenia/ui/window_win.h"
+
+// Microsoft headers after platform_win.h.
+#include <wrl/client.h>
 
 namespace xe {
 namespace ui {
@@ -20,7 +24,7 @@ class Win32FilePicker : public FilePicker {
   Win32FilePicker();
   ~Win32FilePicker() override;
 
-  bool Show(void* parent_window_handle) override;
+  bool Show(Window* parent_window) override;
 
  private:
 };
@@ -106,32 +110,14 @@ Win32FilePicker::Win32FilePicker() = default;
 
 Win32FilePicker::~Win32FilePicker() = default;
 
-template <typename T>
-struct com_ptr {
-  com_ptr() : value(nullptr) {}
-  ~com_ptr() { reset(); }
-  void reset() {
-    if (value) {
-      value->Release();
-      value = nullptr;
-    }
-  }
-  operator T*() { return value; }
-  T* operator->() const { return value; }
-  T** addressof() { return &value; }
-  T* value;
-};
-
-bool Win32FilePicker::Show(void* parent_window_handle) {
+bool Win32FilePicker::Show(Window* parent_window) {
   // TODO(benvanik): FileSaveDialog.
   assert_true(mode() == Mode::kOpen);
-  // TODO(benvanik): folder dialogs.
-  assert_true(type() == Type::kFile);
 
-  com_ptr<IFileDialog> file_dialog;
+  Microsoft::WRL::ComPtr<IFileDialog> file_dialog;
   HRESULT hr =
       CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
-                       IID_PPV_ARGS(file_dialog.addressof()));
+                       IID_PPV_ARGS(&file_dialog));
   if (!SUCCEEDED(hr)) {
     return false;
   }
@@ -146,54 +132,61 @@ bool Win32FilePicker::Show(void* parent_window_handle) {
   if (!SUCCEEDED(hr)) {
     return false;
   }
-  // FOS_PICKFOLDERS
   // FOS_FILEMUSTEXIST
   // FOS_PATHMUSTEXIST
   flags |= FOS_FORCEFILESYSTEM;
   if (multi_selection()) {
     flags |= FOS_ALLOWMULTISELECT;
   }
+  if (type() == Type::kDirectory) {
+    flags |= FOS_PICKFOLDERS;
+  }
   hr = file_dialog->SetOptions(flags);
   if (!SUCCEEDED(hr)) {
     return false;
   }
 
-  // Set the file types to display only. Notice that this is a 1-based array.
-  std::vector<std::pair<std::u16string, std::u16string>> file_pairs;
-  std::vector<COMDLG_FILTERSPEC> file_types;
-  for (const auto& extension : this->extensions()) {
-    const auto& file_pair =
-        file_pairs.emplace_back(std::move(xe::to_utf16(extension.first)),
-                                std::move(xe::to_utf16(extension.second)));
-    file_types.push_back(
-        {(LPCWSTR)file_pair.first.c_str(), (LPCWSTR)file_pair.second.c_str()});
-  }
-  hr = file_dialog->SetFileTypes(static_cast<UINT>(file_types.size()),
-                                 file_types.data());
-  if (!SUCCEEDED(hr)) {
-    return false;
-  }
+  if (type() == Type::kFile) {
+    // Set the file types to display only. Notice that this is a 1-based array.
+    using u16sPair = std::pair<std::u16string, std::u16string>;
+    std::vector<std::unique_ptr<u16sPair>> file_pairs;
+    std::vector<COMDLG_FILTERSPEC> file_types;
+    for (const auto& extension : this->extensions()) {
+      const auto& file_pair =
+          file_pairs.emplace_back(std::make_unique<u16sPair>(
+              xe::to_utf16(extension.first), xe::to_utf16(extension.second)));
+      file_types.push_back(
+          {reinterpret_cast<LPCWSTR>(file_pair->first.c_str()),
+           reinterpret_cast<LPCWSTR>(file_pair->second.c_str())});
+    }
+    hr = file_dialog->SetFileTypes(static_cast<UINT>(file_types.size()),
+                                   file_types.data());
+    if (!SUCCEEDED(hr)) {
+      return false;
+    }
 
-  hr = file_dialog->SetFileTypeIndex(1);
-  if (!SUCCEEDED(hr)) {
-    return false;
+    hr = file_dialog->SetFileTypeIndex(1);
+    if (!SUCCEEDED(hr)) {
+      return false;
+    }
   }
 
   // Create an event handling object, and hook it up to the dialog.
-  com_ptr<IFileDialogEvents> file_dialog_events;
-  hr = CDialogEventHandler_CreateInstance(
-      IID_PPV_ARGS(file_dialog_events.addressof()));
+  Microsoft::WRL::ComPtr<IFileDialogEvents> file_dialog_events;
+  hr = CDialogEventHandler_CreateInstance(IID_PPV_ARGS(&file_dialog_events));
   if (!SUCCEEDED(hr)) {
     return false;
   }
   DWORD cookie;
-  hr = file_dialog->Advise(file_dialog_events, &cookie);
+  hr = file_dialog->Advise(file_dialog_events.Get(), &cookie);
   if (!SUCCEEDED(hr)) {
     return false;
   }
 
   // Show the dialog modally.
-  hr = file_dialog->Show(static_cast<HWND>(parent_window_handle));
+  hr = file_dialog->Show(
+      parent_window ? static_cast<const Win32Window*>(parent_window)->hwnd()
+                    : nullptr);
   file_dialog->Unadvise(cookie);
   if (!SUCCEEDED(hr)) {
     return false;
@@ -201,8 +194,8 @@ bool Win32FilePicker::Show(void* parent_window_handle) {
 
   // Obtain the result once the user clicks the 'Open' button.
   // The result is an IShellItem object.
-  com_ptr<IShellItem> shell_item;
-  hr = file_dialog->GetResult(shell_item.addressof());
+  Microsoft::WRL::ComPtr<IShellItem> shell_item;
+  hr = file_dialog->GetResult(&shell_item);
   if (!SUCCEEDED(hr)) {
     return false;
   }

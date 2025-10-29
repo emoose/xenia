@@ -12,7 +12,7 @@
 
 #include <vector>
 
-#include "xenia/base/main.h"
+#include "xenia/base/platform.h"
 #include "xenia/cpu/backend/x64/x64_backend.h"
 #include "xenia/cpu/hir/hir_builder.h"
 #include "xenia/cpu/ppc/ppc_context.h"
@@ -20,9 +20,7 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/test_module.h"
 
-#include "third_party/catch/single_include/catch.hpp"
-
-#define XENIA_TEST_X64 1
+#include "third_party/catch/include/catch.hpp"
 
 namespace xe {
 namespace cpu {
@@ -37,14 +35,17 @@ class TestFunction {
     memory.reset(new Memory());
     memory->Initialize();
 
-#if XENIA_TEST_X64
     {
-      auto backend = std::make_unique<xe::cpu::backend::x64::X64Backend>();
-      auto processor = std::make_unique<Processor>(memory.get(), nullptr);
-      processor->Setup(std::move(backend));
-      processors.emplace_back(std::move(processor));
+      std::unique_ptr<xe::cpu::backend::Backend> backend;
+#if XE_ARCH_AMD64
+      backend.reset(new xe::cpu::backend::x64::X64Backend());
+#endif  // XE_ARCH
+      if (backend) {
+        auto processor = std::make_unique<Processor>(memory.get(), nullptr);
+        processor->Setup(std::move(backend));
+        processors.emplace_back(std::move(processor));
+      }
     }
-#endif  // XENIA_TEST_X64
 
     for (auto& processor : processors) {
       auto module = std::make_unique<xe::cpu::TestModule>(

@@ -8,26 +8,25 @@ project("xenia-gpu-vulkan")
   language("C++")
   links({
     "fmt",
-    "volk",
+    "glslang-spirv",
     "xenia-base",
     "xenia-gpu",
     "xenia-ui",
-    "xenia-ui-spirv",
     "xenia-ui-vulkan",
     "xxhash",
   })
-  defines({
+  includedirs({
+    project_root.."/third_party/Vulkan-Headers/include",
   })
   local_platform_files()
   files({
-    "shaders/bin/*.h",
+    "../shaders/bytecode/vulkan_spirv/*.h",
   })
 
--- TODO(benvanik): kill this and move to the debugger UI.
 group("src")
 project("xenia-gpu-vulkan-trace-viewer")
   uuid("86a1dddc-a26a-4885-8c55-cf745225d93e")
-  kind("WindowedApp")
+  single_library_windowed_app_kind()
   language("C++")
   links({
     "xenia-apu",
@@ -35,14 +34,12 @@ project("xenia-gpu-vulkan-trace-viewer")
     "xenia-base",
     "xenia-core",
     "xenia-cpu",
-    "xenia-cpu-backend-x64",
     "xenia-gpu",
     "xenia-gpu-vulkan",
     "xenia-hid",
     "xenia-hid-nop",
     "xenia-kernel",
     "xenia-ui",
-    "xenia-ui-spirv",
     "xenia-ui-vulkan",
     "xenia-vfs",
   })
@@ -56,33 +53,29 @@ project("xenia-gpu-vulkan-trace-viewer")
     "libavutil",
     "mspack",
     "snappy",
-    "spirv-tools",
-    "volk",
     "xxhash",
   })
-  defines({
+  includedirs({
+    project_root.."/third_party/Vulkan-Headers/include",
   })
   files({
     "vulkan_trace_viewer_main.cc",
-    "../../base/main_"..platform_suffix..".cc",
+    "../../ui/windowed_app_main_"..platform_suffix..".cc",
   })
+
+  filter("architecture:x86_64")
+    links({
+      "xenia-cpu-backend-x64",
+    })
 
   filter("platforms:Linux")
     links({
       "X11",
       "xcb",
       "X11-xcb",
-      "GL",
-      "vulkan",
     })
 
   filter("platforms:Windows")
-    links({
-      "xenia-apu-xaudio2",
-      "xenia-hid-winkey",
-      "xenia-hid-xinput",
-    })
-
     -- Only create the .user file if it doesn't already exist.
     local user_file = project_root.."/build/xenia-gpu-vulkan-trace-viewer.vcxproj.user"
     if not os.isfile(user_file) then
@@ -104,14 +97,12 @@ project("xenia-gpu-vulkan-trace-dump")
     "xenia-base",
     "xenia-core",
     "xenia-cpu",
-    "xenia-cpu-backend-x64",
     "xenia-gpu",
     "xenia-gpu-vulkan",
     "xenia-hid",
     "xenia-hid-nop",
     "xenia-kernel",
     "xenia-ui",
-    "xenia-ui-spirv",
     "xenia-ui-vulkan",
     "xenia-vfs",
   })
@@ -125,24 +116,26 @@ project("xenia-gpu-vulkan-trace-dump")
     "libavutil",
     "mspack",
     "snappy",
-    "spirv-tools",
-    "volk",
     "xxhash",
   })
-  defines({
+  includedirs({
+    project_root.."/third_party/Vulkan-Headers/include",
   })
   files({
     "vulkan_trace_dump_main.cc",
-    "../../base/main_"..platform_suffix..".cc",
+    "../../base/console_app_main_"..platform_suffix..".cc",
   })
+
+  filter("architecture:x86_64")
+    links({
+      "xenia-cpu-backend-x64",
+    })
 
   filter("platforms:Linux")
     links({
       "X11",
       "xcb",
       "X11-xcb",
-      "GL",
-      "vulkan",
     })
 
   filter("platforms:Windows")

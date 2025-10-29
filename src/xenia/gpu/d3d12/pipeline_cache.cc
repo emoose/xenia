@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "third_party/dxbc/DXBCChecksum.h"
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
@@ -35,7 +36,11 @@
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
 #include "xenia/gpu/d3d12/d3d12_render_target_cache.h"
 #include "xenia/gpu/draw_util.h"
+#include "xenia/gpu/dxbc.h"
+#include "xenia/gpu/dxbc_shader_translator.h"
 #include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/registers.h"
+#include "xenia/gpu/xenos.h"
 #include "xenia/ui/d3d12/d3d12_util.h"
 
 DEFINE_bool(d3d12_dxbc_disasm, false,
@@ -61,19 +66,23 @@ namespace xe {
 namespace gpu {
 namespace d3d12 {
 
-// Generated with `xb buildhlsl`.
-#include "xenia/gpu/d3d12/shaders/dxbc/adaptive_quad_hs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/adaptive_triangle_hs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/continuous_quad_hs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/continuous_triangle_hs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/discrete_quad_hs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/discrete_triangle_hs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/float24_round_ps.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/float24_truncate_ps.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/primitive_point_list_gs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/primitive_quad_list_gs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/primitive_rectangle_list_gs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/tessellation_vs.h"
+// Generated with `xb buildshaders`.
+namespace shaders {
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/adaptive_quad_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/adaptive_triangle_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/continuous_quad_1cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/continuous_quad_4cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/continuous_triangle_1cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/continuous_triangle_3cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/discrete_quad_1cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/discrete_quad_4cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/discrete_triangle_1cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/discrete_triangle_3cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/float24_round_ps.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/float24_truncate_ps.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/tessellation_adaptive_vs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/tessellation_indexed_vs.h"
+}  // namespace shaders
 
 PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
                              const RegisterFile& register_file,
@@ -83,7 +92,8 @@ PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
       register_file_(register_file),
       render_target_cache_(render_target_cache),
       bindless_resources_used_(bindless_resources_used) {
-  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
 
   bool edram_rov_used = render_target_cache.GetPath() ==
                         RenderTargetCache::Path::kPixelShaderInterlock;
@@ -92,7 +102,8 @@ PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
       provider.GetAdapterVendorID(), bindless_resources_used_, edram_rov_used,
       render_target_cache_.gamma_render_target_as_srgb(),
       render_target_cache_.msaa_2x_supported(),
-      render_target_cache_.GetResolutionScale(),
+      render_target_cache_.draw_resolution_scale_x(),
+      render_target_cache_.draw_resolution_scale_y(),
       provider.GetGraphicsAnalysis() != nullptr);
 
   if (edram_rov_used) {
@@ -104,7 +115,8 @@ PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
 PipelineCache::~PipelineCache() { Shutdown(); }
 
 bool PipelineCache::Initialize() {
-  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
 
   // Initialize the command processor thread DXIL objects.
   dxbc_converter_ = nullptr;
@@ -142,6 +154,7 @@ bool PipelineCache::Initialize() {
   creation_threads_busy_ = 0;
   creation_completion_event_ =
       xe::threading::Event::CreateManualResetEvent(true);
+  assert_not_null(creation_completion_event_);
   creation_completion_set_event_ = false;
   creation_threads_shutdown_from_ = SIZE_MAX;
   if (cvars::d3d12_pipeline_creation_threads != 0) {
@@ -157,6 +170,7 @@ bool PipelineCache::Initialize() {
     for (size_t i = 0; i < creation_thread_count; ++i) {
       std::unique_ptr<xe::threading::Thread> creation_thread =
           xe::threading::Thread::Create({}, [this, i]() { CreationThread(i); });
+      assert_not_null(creation_thread);
       creation_thread->set_name("D3D12 Pipelines");
       creation_threads_.push_back(std::move(creation_thread));
     }
@@ -165,9 +179,8 @@ bool PipelineCache::Initialize() {
 }
 
 void PipelineCache::Shutdown() {
-  ClearCache(true);
-
-  // Shut down all threads.
+  // Shut down all threads, before destroying the pipelines since they may be
+  // creating them.
   if (!creation_threads_.empty()) {
     {
       std::lock_guard<std::mutex> lock(creation_request_lock_);
@@ -181,44 +194,11 @@ void PipelineCache::Shutdown() {
   }
   creation_completion_event_.reset();
 
-  ui::d3d12::util::ReleaseAndNull(dxc_compiler_);
-  ui::d3d12::util::ReleaseAndNull(dxc_utils_);
-  ui::d3d12::util::ReleaseAndNull(dxbc_converter_);
-}
-
-void PipelineCache::ClearCache(bool shutting_down) {
-  bool reinitialize_shader_storage =
-      !shutting_down && storage_write_thread_ != nullptr;
-  std::filesystem::path shader_storage_cache_root;
-  uint32_t shader_storage_title_id = shader_storage_title_id_;
-  if (reinitialize_shader_storage) {
-    shader_storage_cache_root = shader_storage_cache_root_;
-  }
+  // Shut down the persistent shader / pipeline storage.
   ShutdownShaderStorage();
 
-  // Remove references to the current pipeline.
-  current_pipeline_ = nullptr;
-
-  if (!creation_threads_.empty()) {
-    // Empty the pipeline creation queue and make sure there are no threads
-    // currently creating pipelines because pipelines are going to be deleted.
-    bool await_creation_completion_event = false;
-    {
-      std::lock_guard<std::mutex> lock(creation_request_lock_);
-      creation_queue_.clear();
-      await_creation_completion_event = creation_threads_busy_ != 0;
-      if (await_creation_completion_event) {
-        creation_completion_event_->Reset();
-        creation_completion_set_event_ = true;
-      }
-    }
-    if (await_creation_completion_event) {
-      creation_request_cond_.notify_one();
-      xe::threading::Wait(creation_completion_event_.get(), false);
-    }
-  }
-
   // Destroy all pipelines.
+  current_pipeline_ = nullptr;
   for (auto it : pipelines_) {
     it.second->state->Release();
     delete it.second;
@@ -227,7 +207,6 @@ void PipelineCache::ClearCache(bool shutting_down) {
   COUNT_profile_set("gpu/pipeline_cache/pipelines", 0);
 
   // Destroy all shaders.
-  command_processor_.NotifyShaderBindingsLayoutUIDsInvalidated();
   if (bindless_resources_used_) {
     bindless_sampler_layout_map_.clear();
     bindless_sampler_layouts_.clear();
@@ -240,10 +219,10 @@ void PipelineCache::ClearCache(bool shutting_down) {
   shaders_.clear();
   shader_storage_index_ = 0;
 
-  if (reinitialize_shader_storage) {
-    InitializeShaderStorage(shader_storage_cache_root, shader_storage_title_id,
-                            false);
-  }
+  // Shut down shader translation.
+  ui::d3d12::util::ReleaseAndNull(dxc_compiler_);
+  ui::d3d12::util::ReleaseAndNull(dxc_utils_);
+  ui::d3d12::util::ReleaseAndNull(dxbc_converter_);
 }
 
 void PipelineCache::InitializeShaderStorage(
@@ -409,13 +388,15 @@ void PipelineCache::InitializeShaderStorage(
     std::mutex shaders_failed_to_translate_mutex;
     std::vector<D3D12Shader::D3D12Translation*> shaders_failed_to_translate;
     auto shader_translation_thread_function = [&]() {
-      auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
+      const ui::d3d12::D3D12Provider& provider =
+          command_processor_.GetD3D12Provider();
       StringBuffer ucode_disasm_buffer;
       DxbcShaderTranslator translator(
           provider.GetAdapterVendorID(), bindless_resources_used_,
           edram_rov_used, render_target_cache_.gamma_render_target_as_srgb(),
           render_target_cache_.msaa_2x_supported(),
-          render_target_cache_.GetResolutionScale(),
+          render_target_cache_.draw_resolution_scale_x(),
+          render_target_cache_.draw_resolution_scale_y(),
           provider.GetGraphicsAnalysis() != nullptr);
       // If needed and possible, create objects needed for DXIL conversion and
       // disassembly on this thread.
@@ -531,9 +512,11 @@ void PipelineCache::InitializeShaderStorage(
       }
       while (shader_translation_threads.size() <
              shader_translation_threads_needed) {
-        shader_translation_threads.push_back(xe::threading::Thread::Create(
-            {}, shader_translation_thread_function));
-        shader_translation_threads.back()->set_name("Shader Translation");
+        auto thread = xe::threading::Thread::Create(
+            {}, shader_translation_thread_function);
+        assert_not_null(thread);
+        thread->set_name("Shader Translation");
+        shader_translation_threads.push_back(std::move(thread));
       }
       // Request ucode information gathering and translation of all the needed
       // shaders.
@@ -597,6 +580,7 @@ void PipelineCache::InitializeShaderStorage(
           xe::threading::Thread::Create({}, [this, creation_thread_index]() {
             CreationThread(creation_thread_index);
           });
+      assert_not_null(creation_thread);
       creation_thread->set_name("D3D12 Pipelines");
       creation_threads_.push_back(std::move(creation_thread));
     }
@@ -661,13 +645,24 @@ void PipelineCache::InitializeShaderStorage(
         pixel_shader = nullptr;
         pipeline_runtime_description.pixel_shader = nullptr;
       }
+      GeometryShaderKey pipeline_geometry_shader_key;
+      pipeline_runtime_description.geometry_shader =
+          GetGeometryShaderKey(
+              pipeline_description.geometry_shader,
+              DxbcShaderTranslator::Modification(
+                  pipeline_description.vertex_shader_modification),
+              DxbcShaderTranslator::Modification(
+                  pipeline_description.pixel_shader_modification),
+              pipeline_geometry_shader_key)
+              ? &GetGeometryShader(pipeline_geometry_shader_key)
+              : nullptr;
       pipeline_runtime_description.root_signature =
           command_processor_.GetRootSignature(
               vertex_shader, pixel_shader,
-              DxbcShaderTranslator::Modification(
-                  pipeline_description.vertex_shader_modification)
-                      .vertex.host_vertex_shader_type !=
-                  Shader::HostVertexShaderType::kVertex);
+              Shader::IsHostVertexShaderTypeDomain(
+                  DxbcShaderTranslator::Modification(
+                      pipeline_description.vertex_shader_modification)
+                      .vertex.host_vertex_shader_type));
       if (!pipeline_runtime_description.root_signature) {
         continue;
       }
@@ -694,37 +689,39 @@ void PipelineCache::InitializeShaderStorage(
       ++pipelines_created;
     }
 
-    CreateQueuedPipelinesOnProcessorThread();
-    if (creation_threads_.size() > creation_thread_original_count) {
-      {
-        std::lock_guard<std::mutex> lock(creation_request_lock_);
-        creation_threads_shutdown_from_ = creation_thread_original_count;
-        // Assuming the queue is empty because of
-        // CreateQueuedPipelinesOnProcessorThread.
-      }
-      creation_request_cond_.notify_all();
-      while (creation_threads_.size() > creation_thread_original_count) {
-        xe::threading::Wait(creation_threads_.back().get(), false);
-        creation_threads_.pop_back();
-      }
-      bool await_creation_completion_event;
-      {
-        // Cleanup so additional threads can be created later again.
-        std::lock_guard<std::mutex> lock(creation_request_lock_);
-        creation_threads_shutdown_from_ = SIZE_MAX;
-        // If the invocation is blocking, all the shader storage initialization
-        // is expected to be done before proceeding, to avoid latency in the
-        // command processor after the invocation.
-        await_creation_completion_event =
-            blocking && creation_threads_busy_ != 0;
-        if (await_creation_completion_event) {
-          creation_completion_event_->Reset();
-          creation_completion_set_event_ = true;
+    if (!creation_threads_.empty()) {
+      CreateQueuedPipelinesOnProcessorThread();
+      if (creation_threads_.size() > creation_thread_original_count) {
+        {
+          std::lock_guard<std::mutex> lock(creation_request_lock_);
+          creation_threads_shutdown_from_ = creation_thread_original_count;
+          // Assuming the queue is empty because of
+          // CreateQueuedPipelinesOnProcessorThread.
         }
-      }
-      if (await_creation_completion_event) {
-        creation_request_cond_.notify_one();
-        xe::threading::Wait(creation_completion_event_.get(), false);
+        creation_request_cond_.notify_all();
+        while (creation_threads_.size() > creation_thread_original_count) {
+          xe::threading::Wait(creation_threads_.back().get(), false);
+          creation_threads_.pop_back();
+        }
+        bool await_creation_completion_event;
+        {
+          // Cleanup so additional threads can be created later again.
+          std::lock_guard<std::mutex> lock(creation_request_lock_);
+          creation_threads_shutdown_from_ = SIZE_MAX;
+          // If the invocation is blocking, all the shader storage
+          // initialization is expected to be done before proceeding, to avoid
+          // latency in the command processor after the invocation.
+          await_creation_completion_event =
+              blocking && creation_threads_busy_ != 0;
+          if (await_creation_completion_event) {
+            creation_completion_event_->Reset();
+            creation_completion_set_event_ = true;
+          }
+        }
+        if (await_creation_completion_event) {
+          creation_request_cond_.notify_one();
+          xe::threading::Wait(creation_completion_event_.get(), false);
+        }
       }
     }
 
@@ -760,6 +757,8 @@ void PipelineCache::InitializeShaderStorage(
   storage_write_thread_shutdown_ = false;
   storage_write_thread_ =
       xe::threading::Thread::Create({}, [this]() { StorageWriteThread(); });
+  assert_not_null(storage_write_thread_);
+  storage_write_thread_->set_name("D3D12 Storage writer");
 }
 
 void PipelineCache::ShutdownShaderStorage() {
@@ -863,152 +862,112 @@ D3D12Shader* PipelineCache::LoadShader(xenos::ShaderType shader_type,
   return shader;
 }
 
-bool PipelineCache::GetCurrentShaderModification(
-    const Shader& shader,
-    DxbcShaderTranslator::Modification& modification_out) const {
+DxbcShaderTranslator::Modification
+PipelineCache::GetCurrentVertexShaderModification(
+    const Shader& shader, Shader::HostVertexShaderType host_vertex_shader_type,
+    uint32_t interpolator_mask) const {
+  assert_true(shader.type() == xenos::ShaderType::kVertex);
   assert_true(shader.is_ucode_analyzed());
   const auto& regs = register_file_;
-  auto sq_program_cntl = regs.Get<reg::SQ_PROGRAM_CNTL>();
-  if (shader.type() == xenos::ShaderType::kVertex) {
-    Shader::HostVertexShaderType host_vertex_shader_type =
-        GetCurrentHostVertexShaderTypeIfValid();
-    if (host_vertex_shader_type == Shader::HostVertexShaderType(-1)) {
-      return false;
-    }
-    modification_out = DxbcShaderTranslator::Modification(
-        shader_translator_->GetDefaultVertexShaderModification(
-            shader.GetDynamicAddressableRegisterCount(
-                sq_program_cntl.vs_num_reg),
-            host_vertex_shader_type));
-  } else {
-    assert_true(shader.type() == xenos::ShaderType::kPixel);
-    DxbcShaderTranslator::Modification pixel_shader_modification(
-        shader_translator_->GetDefaultPixelShaderModification(
-            shader.GetDynamicAddressableRegisterCount(
-                sq_program_cntl.ps_num_reg)));
-    if (render_target_cache_.GetPath() ==
-        RenderTargetCache::Path::kHostRenderTargets) {
-      using DepthStencilMode =
-          DxbcShaderTranslator::Modification::DepthStencilMode;
-      RenderTargetCache::DepthFloat24Conversion depth_float24_conversion =
-          render_target_cache_.depth_float24_conversion();
-      if ((depth_float24_conversion ==
-               RenderTargetCache::DepthFloat24Conversion::kOnOutputTruncating ||
-           depth_float24_conversion ==
-               RenderTargetCache::DepthFloat24Conversion::kOnOutputRounding) &&
-          draw_util::GetDepthControlForCurrentEdramMode(regs).z_enable &&
-          regs.Get<reg::RB_DEPTH_INFO>().depth_format ==
-              xenos::DepthRenderTargetFormat::kD24FS8) {
-        pixel_shader_modification.pixel.depth_stencil_mode =
-            depth_float24_conversion ==
-                    RenderTargetCache::DepthFloat24Conversion::
-                        kOnOutputTruncating
-                ? DepthStencilMode::kFloat24Truncating
-                : DepthStencilMode::kFloat24Rounding;
-      } else {
-        if (shader.implicit_early_z_write_allowed() &&
-            (!shader.writes_color_target(0) ||
-             !draw_util::DoesCoverageDependOnAlpha(
-                 regs.Get<reg::RB_COLORCONTROL>()))) {
-          pixel_shader_modification.pixel.depth_stencil_mode =
-              DepthStencilMode::kEarlyHint;
-        } else {
-          pixel_shader_modification.pixel.depth_stencil_mode =
-              DepthStencilMode::kNoModifiers;
-        }
-      }
-    }
-    modification_out = pixel_shader_modification;
-  }
-  return true;
+
+  DxbcShaderTranslator::Modification modification(
+      shader_translator_->GetDefaultVertexShaderModification(
+          shader.GetDynamicAddressableRegisterCount(
+              regs.Get<reg::SQ_PROGRAM_CNTL>().vs_num_reg),
+          host_vertex_shader_type));
+
+  modification.vertex.interpolator_mask = interpolator_mask;
+
+  auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+  uint32_t user_clip_planes =
+      pa_cl_clip_cntl.clip_disable ? 0 : pa_cl_clip_cntl.ucp_ena;
+  modification.vertex.user_clip_plane_count = xe::bit_count(user_clip_planes);
+  modification.vertex.user_clip_plane_cull =
+      uint32_t(user_clip_planes && pa_cl_clip_cntl.ucp_cull_only_ena);
+  modification.vertex.vertex_kill_and =
+      uint32_t((shader.writes_point_size_edge_flag_kill_vertex() & 0b100) &&
+               !pa_cl_clip_cntl.vtx_kill_or);
+
+  modification.vertex.output_point_size =
+      uint32_t((shader.writes_point_size_edge_flag_kill_vertex() & 0b001) &&
+               regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type ==
+                   xenos::PrimitiveType::kPointList);
+
+  return modification;
 }
 
-Shader::HostVertexShaderType
-PipelineCache::GetCurrentHostVertexShaderTypeIfValid() const {
-  // If the values this functions returns are changed, INVALIDATE THE SHADER
-  // STORAGE (increase kVersion for BOTH shaders and pipelines)! The exception
-  // is when the function originally returned "unsupported", but started to
-  // return a valid value (in this case the shader wouldn't be cached in the
-  // first place). Otherwise games will not be able to locate shaders for draws
-  // for which the host vertex shader type has changed!
+DxbcShaderTranslator::Modification
+PipelineCache::GetCurrentPixelShaderModification(
+    const Shader& shader, uint32_t interpolator_mask, uint32_t param_gen_pos,
+    reg::RB_DEPTHCONTROL normalized_depth_control) const {
+  assert_true(shader.type() == xenos::ShaderType::kPixel);
+  assert_true(shader.is_ucode_analyzed());
   const auto& regs = register_file_;
-  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
-  if (!xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
-                                  vgt_draw_initiator.prim_type)) {
-    // VGT_OUTPUT_PATH_CNTL and HOS registers are ignored in implicit major
-    // mode.
-    return Shader::HostVertexShaderType::kVertex;
+
+  DxbcShaderTranslator::Modification modification(
+      shader_translator_->GetDefaultPixelShaderModification(
+          shader.GetDynamicAddressableRegisterCount(
+              regs.Get<reg::SQ_PROGRAM_CNTL>().ps_num_reg)));
+
+  modification.pixel.interpolator_mask = interpolator_mask;
+  modification.pixel.interpolators_centroid =
+      interpolator_mask &
+      ~xenos::GetInterpolatorSamplingPattern(
+          regs.Get<reg::RB_SURFACE_INFO>().msaa_samples,
+          regs.Get<reg::SQ_CONTEXT_MISC>().sc_sample_cntl,
+          regs.Get<reg::SQ_INTERPOLATOR_CNTL>().sampling_pattern);
+
+  if (param_gen_pos < xenos::kMaxInterpolators) {
+    modification.pixel.param_gen_enable = 1;
+    modification.pixel.param_gen_interpolator = param_gen_pos;
+    modification.pixel.param_gen_point =
+        uint32_t(regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type ==
+                 xenos::PrimitiveType::kPointList);
+  } else {
+    modification.pixel.param_gen_enable = 0;
+    modification.pixel.param_gen_interpolator = 0;
+    modification.pixel.param_gen_point = 0;
   }
-  if (regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select !=
-      xenos::VGTOutputPath::kTessellationEnable) {
-    return Shader::HostVertexShaderType::kVertex;
-  }
-  xenos::TessellationMode tessellation_mode =
-      regs.Get<reg::VGT_HOS_CNTL>().tess_mode;
-  switch (vgt_draw_initiator.prim_type) {
-    case xenos::PrimitiveType::kTriangleList:
-      // Also supported by triangle strips and fans according to:
-      // https://www.khronos.org/registry/OpenGL/extensions/AMD/AMD_vertex_shader_tessellator.txt
-      // Would need to convert those to triangle lists, but haven't seen any
-      // games using tessellated strips/fans so far.
-      switch (tessellation_mode) {
-        case xenos::TessellationMode::kDiscrete:
-          // - Call of Duty 3 - nets above barrels in the beginning of the
-          //   first mission (turn right after the end of the intro) -
-          //   kTriangleList.
-        case xenos::TessellationMode::kContinuous:
-          // - Viva Pinata - tree building with a beehive in the beginning
-          //   (visible on the start screen behind the logo), waterfall in the
-          //   beginning - kTriangleList.
-          return Shader::HostVertexShaderType::kTriangleDomainCPIndexed;
-        default:
-          break;
+
+  if (render_target_cache_.GetPath() ==
+      RenderTargetCache::Path::kHostRenderTargets) {
+    using DepthStencilMode =
+        DxbcShaderTranslator::Modification::DepthStencilMode;
+    if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
+        normalized_depth_control.z_enable &&
+        regs.Get<reg::RB_DEPTH_INFO>().depth_format ==
+            xenos::DepthRenderTargetFormat::kD24FS8) {
+      modification.pixel.depth_stencil_mode =
+          render_target_cache_.depth_float24_round()
+              ? DepthStencilMode::kFloat24Rounding
+              : DepthStencilMode::kFloat24Truncating;
+    } else {
+      if (shader.implicit_early_z_write_allowed() &&
+          (!shader.writes_color_target(0) ||
+           !draw_util::DoesCoverageDependOnAlpha(
+               regs.Get<reg::RB_COLORCONTROL>()))) {
+        modification.pixel.depth_stencil_mode = DepthStencilMode::kEarlyHint;
+      } else {
+        modification.pixel.depth_stencil_mode = DepthStencilMode::kNoModifiers;
       }
-      break;
-    case xenos::PrimitiveType::kQuadList:
-      switch (tessellation_mode) {
-        // Also supported by quad strips according to:
-        // https://www.khronos.org/registry/OpenGL/extensions/AMD/AMD_vertex_shader_tessellator.txt
-        // Would need to convert those to quad lists, but haven't seen any games
-        // using tessellated strips so far.
-        case xenos::TessellationMode::kDiscrete:
-          // Not seen in games so far.
-        case xenos::TessellationMode::kContinuous:
-          // - Defender - retro screen and beams in the main menu - kQuadList.
-          return Shader::HostVertexShaderType::kQuadDomainCPIndexed;
-        default:
-          break;
-      }
-      break;
-    case xenos::PrimitiveType::kTrianglePatch:
-      // - Banjo-Kazooie: Nuts & Bolts - water - adaptive.
-      // - Halo 3 - water - adaptive.
-      return Shader::HostVertexShaderType::kTriangleDomainPatchIndexed;
-    case xenos::PrimitiveType::kQuadPatch:
-      // - Fable II - continuous.
-      // - Viva Pinata - garden ground - adaptive.
-      return Shader::HostVertexShaderType::kQuadDomainPatchIndexed;
-    default:
-      // TODO(Triang3l): Support line patches.
-      break;
+    }
   }
-  XELOGE(
-      "Unsupported tessellation mode {} for primitive type {}. Report the game "
-      "to Xenia developers!",
-      uint32_t(tessellation_mode), uint32_t(vgt_draw_initiator.prim_type));
-  return Shader::HostVertexShaderType(-1);
+
+  return modification;
 }
 
 bool PipelineCache::ConfigurePipeline(
     D3D12Shader::D3D12Translation* vertex_shader,
     D3D12Shader::D3D12Translation* pixel_shader,
-    xenos::PrimitiveType primitive_type, xenos::IndexFormat index_format,
+    const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
+    reg::RB_DEPTHCONTROL normalized_depth_control,
+    uint32_t normalized_color_mask,
     uint32_t bound_depth_and_color_render_target_bits,
     const uint32_t* bound_depth_and_color_render_target_formats,
     void** pipeline_handle_out, ID3D12RootSignature** root_signature_out) {
-#if XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
-#endif  // XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
   assert_not_null(pipeline_handle_out);
   assert_not_null(root_signature_out);
@@ -1073,7 +1032,8 @@ bool PipelineCache::ConfigurePipeline(
 
   PipelineRuntimeDescription runtime_description;
   if (!GetCurrentStateDescription(
-          vertex_shader, pixel_shader, primitive_type, index_format,
+          vertex_shader, pixel_shader, primitive_processing_result,
+          normalized_depth_control, normalized_color_mask,
           bound_depth_and_color_render_target_bits,
           bound_depth_and_color_render_target_formats, runtime_description)) {
     return false;
@@ -1178,6 +1138,8 @@ bool PipelineCache::TranslateAnalyzedShader(
         host_shader_type = "patch-indexed quad domain";
         break;
       default:
+        assert(modification.vertex.host_vertex_shader_type ==
+               Shader::HostVertexShaderType::kVertex);
         host_shader_type = "vertex";
     }
   } else {
@@ -1191,10 +1153,10 @@ bool PipelineCache::TranslateAnalyzedShader(
   if (shader.EnterBindingLayoutUserUIDSetup()) {
     const std::vector<D3D12Shader::TextureBinding>& texture_bindings =
         shader.GetTextureBindingsAfterTranslation();
-    uint32_t texture_binding_count = uint32_t(texture_bindings.size());
+    size_t texture_binding_count = texture_bindings.size();
     const std::vector<D3D12Shader::SamplerBinding>& sampler_bindings =
         shader.GetSamplerBindingsAfterTranslation();
-    uint32_t sampler_binding_count = uint32_t(sampler_bindings.size());
+    size_t sampler_binding_count = sampler_bindings.size();
     assert_false(bindless_resources_used_ &&
                  texture_binding_count + sampler_binding_count >
                      D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 4);
@@ -1205,13 +1167,13 @@ bool PipelineCache::TranslateAnalyzedShader(
       texture_binding_layout_hash =
           XXH3_64bits(texture_bindings.data(), texture_binding_layout_bytes);
     }
-    uint32_t bindless_sampler_count =
+    size_t bindless_sampler_count =
         bindless_resources_used_ ? sampler_binding_count : 0;
     uint64_t bindless_sampler_layout_hash = 0;
     if (bindless_sampler_count) {
       XXH3_state_t hash_state;
       XXH3_64bits_reset(&hash_state);
-      for (uint32_t i = 0; i < bindless_sampler_count; ++i) {
+      for (size_t i = 0; i < bindless_sampler_count; ++i) {
         XXH3_64bits_update(
             &hash_state, &sampler_bindings[i].bindless_descriptor_index,
             sizeof(sampler_bindings[i].bindless_descriptor_index));
@@ -1229,11 +1191,10 @@ bool PipelineCache::TranslateAnalyzedShader(
         kLayoutUIDEmpty == 0,
         "Empty layout UID is assumed to be 0 because for bindful samplers, the "
         "UID is their count");
-    size_t sampler_binding_layout_uid = bindless_resources_used_
-                                            ? kLayoutUIDEmpty
-                                            : size_t(sampler_binding_count);
+    size_t sampler_binding_layout_uid =
+        bindless_resources_used_ ? kLayoutUIDEmpty : sampler_binding_count;
     if (texture_binding_count || bindless_sampler_count) {
-      std::lock_guard<std::mutex> layouts_mutex_(layouts_mutex_);
+      std::lock_guard<std::mutex> layouts_lock(layouts_mutex_);
       if (texture_binding_count) {
         auto found_range = texture_binding_layout_map_.equal_range(
             texture_binding_layout_hash);
@@ -1276,7 +1237,7 @@ bool PipelineCache::TranslateAnalyzedShader(
           sampler_binding_layout_uid = it->second.uid;
           const uint32_t* vector_bindless_sampler_layout =
               bindless_sampler_layouts_.data() + it->second.vector_span_offset;
-          for (uint32_t i = 0; i < bindless_sampler_count; ++i) {
+          for (size_t i = 0; i < bindless_sampler_count; ++i) {
             if (vector_bindless_sampler_layout[i] !=
                 sampler_bindings[i].bindless_descriptor_index) {
               sampler_binding_layout_uid = kLayoutUIDEmpty;
@@ -1301,7 +1262,7 @@ bool PipelineCache::TranslateAnalyzedShader(
                                            sampler_binding_count);
           uint32_t* vector_bindless_sampler_layout =
               bindless_sampler_layouts_.data() + new_uid.vector_span_offset;
-          for (uint32_t i = 0; i < bindless_sampler_count; ++i) {
+          for (size_t i = 0; i < bindless_sampler_count; ++i) {
             vector_bindless_sampler_layout[i] =
                 sampler_bindings[i].bindless_descriptor_index;
           }
@@ -1315,7 +1276,8 @@ bool PipelineCache::TranslateAnalyzedShader(
   }
 
   // Disassemble the shader for dumping.
-  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
   if (cvars::d3d12_dxbc_disasm_dxilconv) {
     translation.DisassembleDxbcAndDxil(provider, cvars::d3d12_dxbc_disasm,
                                        dxbc_converter, dxc_utils, dxc_compiler);
@@ -1339,7 +1301,9 @@ bool PipelineCache::TranslateAnalyzedShader(
 bool PipelineCache::GetCurrentStateDescription(
     D3D12Shader::D3D12Translation* vertex_shader,
     D3D12Shader::D3D12Translation* pixel_shader,
-    xenos::PrimitiveType primitive_type, xenos::IndexFormat index_format,
+    const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
+    reg::RB_DEPTHCONTROL normalized_depth_control,
+    uint32_t normalized_color_mask,
     uint32_t bound_depth_and_color_render_target_bits,
     const uint32_t* bound_depth_and_color_render_target_formats,
     PipelineRuntimeDescription& runtime_description_out) {
@@ -1356,12 +1320,11 @@ bool PipelineCache::GetCurrentStateDescription(
   // Initialize all unused fields to zero for comparison/hashing.
   std::memset(&runtime_description_out, 0, sizeof(runtime_description_out));
 
-  bool tessellated =
-      DxbcShaderTranslator::Modification(vertex_shader->modification())
-          .vertex.host_vertex_shader_type !=
-      Shader::HostVertexShaderType::kVertex;
-  bool primitive_polygonal =
-      xenos::IsPrimitivePolygonal(tessellated, primitive_type);
+  assert_true(DxbcShaderTranslator::Modification(vertex_shader->modification())
+                  .vertex.host_vertex_shader_type ==
+              primitive_processing_result.host_vertex_shader_type);
+  bool tessellated = primitive_processing_result.IsTessellated();
+  bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
   bool rasterization_enabled =
       draw_util::IsRasterizationPotentiallyDone(regs, primitive_polygonal);
   // In Direct3D, rasterization (along with pixel counting) is disabled by
@@ -1396,12 +1359,12 @@ bool PipelineCache::GetCurrentStateDescription(
   description_out.vertex_shader_modification = vertex_shader->modification();
 
   // Index buffer strip cut value.
-  if (pa_su_sc_mode_cntl.multi_prim_ib_ena) {
-    // Not using 0xFFFF with 32-bit indices because in index buffers it will be
-    // 0xFFFF0000 anyway due to endianness.
-    description_out.strip_cut_index = index_format == xenos::IndexFormat::kInt32
-                                          ? PipelineStripCutIndex::kFFFFFFFF
-                                          : PipelineStripCutIndex::kFFFF;
+  if (primitive_processing_result.host_primitive_reset_enabled) {
+    description_out.strip_cut_index =
+        primitive_processing_result.host_index_format ==
+                xenos::IndexFormat::kInt16
+            ? PipelineStripCutIndex::kFFFF
+            : PipelineStripCutIndex::kFFFFFFFF;
   } else {
     description_out.strip_cut_index = PipelineStripCutIndex::kNone;
   }
@@ -1409,16 +1372,15 @@ bool PipelineCache::GetCurrentStateDescription(
   // Host vertex shader type and primitive topology.
   if (tessellated) {
     description_out.primitive_topology_type_or_tessellation_mode =
-        uint32_t(regs.Get<reg::VGT_HOS_CNTL>().tess_mode);
+        uint32_t(primitive_processing_result.tessellation_mode);
   } else {
-    switch (primitive_type) {
+    switch (primitive_processing_result.host_primitive_type) {
       case xenos::PrimitiveType::kPointList:
         description_out.primitive_topology_type_or_tessellation_mode =
             uint32_t(PipelinePrimitiveTopologyType::kPoint);
         break;
       case xenos::PrimitiveType::kLineList:
       case xenos::PrimitiveType::kLineStrip:
-      case xenos::PrimitiveType::kLineLoop:
       // Quads are emulated as line lists with adjacency.
       case xenos::PrimitiveType::kQuadList:
       case xenos::PrimitiveType::k2DLineStrip:
@@ -1430,7 +1392,7 @@ bool PipelineCache::GetCurrentStateDescription(
             uint32_t(PipelinePrimitiveTopologyType::kTriangle);
         break;
     }
-    switch (primitive_type) {
+    switch (primitive_processing_result.host_primitive_type) {
       case xenos::PrimitiveType::kPointList:
         description_out.geometry_shader = PipelineGeometryShader::kPointList;
         break;
@@ -1446,6 +1408,16 @@ bool PipelineCache::GetCurrentStateDescription(
         break;
     }
   }
+  GeometryShaderKey geometry_shader_key;
+  runtime_description_out.geometry_shader =
+      GetGeometryShaderKey(
+          description_out.geometry_shader,
+          DxbcShaderTranslator::Modification(vertex_shader->modification()),
+          DxbcShaderTranslator::Modification(
+              pixel_shader ? pixel_shader->modification() : 0),
+          geometry_shader_key)
+          ? &GetGeometryShader(geometry_shader_key)
+          : nullptr;
 
   // The rest doesn't matter when rasterization is disabled (thus no writing to
   // anywhere from post-geometry stages and no samples are counted).
@@ -1479,7 +1451,6 @@ bool PipelineCache::GetCurrentStateDescription(
   // rasterization will be disabled externally, or the draw call will be dropped
   // early if the vertex shader doesn't export to memory.
   bool cull_front, cull_back;
-  float poly_offset = 0.0f, poly_offset_scale = 0.0f;
   if (primitive_polygonal) {
     description_out.front_counter_clockwise = pa_su_sc_mode_cntl.face == 0;
     cull_front = pa_su_sc_mode_cntl.cull_front != 0;
@@ -1503,10 +1474,6 @@ bool PipelineCache::GetCurrentStateDescription(
           xenos::PolygonType::kTriangles) {
         description_out.fill_mode_wireframe = 1;
       }
-      if (!edram_rov_used && pa_su_sc_mode_cntl.poly_offset_front_enable) {
-        poly_offset = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET].f32;
-        poly_offset_scale = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE].f32;
-      }
     }
     if (!cull_back) {
       // Back faces aren't culled.
@@ -1514,54 +1481,23 @@ bool PipelineCache::GetCurrentStateDescription(
           xenos::PolygonType::kTriangles) {
         description_out.fill_mode_wireframe = 1;
       }
-      // Prefer front depth bias because in general, front faces are the ones
-      // that are rendered (except for shadow volumes).
-      if (!edram_rov_used && pa_su_sc_mode_cntl.poly_offset_back_enable &&
-          poly_offset == 0.0f && poly_offset_scale == 0.0f) {
-        poly_offset = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET].f32;
-        poly_offset_scale = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE].f32;
-      }
     }
-    if (pa_su_sc_mode_cntl.poly_mode == xenos::PolygonModeEnable::kDisabled) {
+    if (pa_su_sc_mode_cntl.poly_mode != xenos::PolygonModeEnable::kDualMode) {
       description_out.fill_mode_wireframe = 0;
     }
   } else {
     // Filled front faces only, without culling.
     cull_front = false;
     cull_back = false;
-    if (!edram_rov_used && pa_su_sc_mode_cntl.poly_offset_para_enable) {
-      poly_offset = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET].f32;
-      poly_offset_scale = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE].f32;
-    }
   }
   if (!edram_rov_used) {
-    // Conversion based on the calculations in Call of Duty 4 and the values it
-    // writes to the registers, and also on:
-    // https://github.com/mesa3d/mesa/blob/54ad9b444c8e73da498211870e785239ad3ff1aa/src/gallium/drivers/radeonsi/si_state.c#L943
-    // Dividing the scale by 2 - Call of Duty 4 sets the constant bias of
-    // 1/32768 for decals, however, it's done in two steps in separate places:
-    // first it's divided by 65536, and then it's multiplied by 2 (which is
-    // consistent with what si_create_rs_state does, which multiplies the offset
-    // by 2 if it comes from a non-D3D9 API for 24-bit depth buffers) - and
-    // multiplying by 2 to the number of significand bits. Tested mostly in Call
-    // of Duty 4 (vehicledamage map explosion decals) and Red Dead Redemption
-    // (shadows - 2^17 is not enough, 2^18 hasn't been tested, but 2^19
-    // eliminates the acne).
-    if (regs.Get<reg::RB_DEPTH_INFO>().depth_format ==
-        xenos::DepthRenderTargetFormat::kD24FS8) {
-      poly_offset *= float(1 << 19);
-    } else {
-      poly_offset *= float(1 << 23);
-    }
-    // Using ceil here just in case a game wants the offset but passes a value
-    // that is too small - it's better to apply more offset than to make depth
-    // fighting worse or to disable the offset completely (Direct3D 12 takes an
-    // integer value).
-    description_out.depth_bias = int32_t(std::ceil(std::abs(poly_offset))) *
-                                 (poly_offset < 0.0f ? -1 : 1);
-    // "slope computed in subpixels (1/12 or 1/16)" - R5xx Acceleration.
+    float polygon_offset, polygon_offset_scale;
+    draw_util::GetPreferredFacePolygonOffset(
+        regs, primitive_polygonal, polygon_offset_scale, polygon_offset);
+    description_out.depth_bias = draw_util::GetD3D10IntegerPolygonOffset(
+        regs.Get<reg::RB_DEPTH_INFO>().depth_format, polygon_offset);
     description_out.depth_bias_slope_scaled =
-        poly_offset_scale * (1.0f / 16.0f);
+        polygon_offset_scale * xenos::kPolygonOffsetScaleSubpixelUnit;
   }
   if (tessellated && cvars::d3d12_tessellation_wireframe) {
     description_out.fill_mode_wireframe = 1;
@@ -1572,18 +1508,16 @@ bool PipelineCache::GetCurrentStateDescription(
     // Depth/stencil. No stencil, always passing depth test and no depth writing
     // means depth disabled.
     if (bound_depth_and_color_render_target_bits & 1) {
-      auto rb_depthcontrol =
-          draw_util::GetDepthControlForCurrentEdramMode(regs);
-      if (rb_depthcontrol.z_enable) {
-        description_out.depth_func = rb_depthcontrol.zfunc;
-        description_out.depth_write = rb_depthcontrol.z_write_enable;
+      if (normalized_depth_control.z_enable) {
+        description_out.depth_func = normalized_depth_control.zfunc;
+        description_out.depth_write = normalized_depth_control.z_write_enable;
       } else {
         description_out.depth_func = xenos::CompareFunction::kAlways;
       }
-      if (rb_depthcontrol.stencil_enable) {
+      if (normalized_depth_control.stencil_enable) {
         description_out.stencil_enable = 1;
         bool stencil_backface_enable =
-            primitive_polygonal && rb_depthcontrol.backface_enable;
+            primitive_polygonal && normalized_depth_control.backface_enable;
         // Per-face masks not supported by Direct3D 12, choose the back face
         // ones only if drawing only back faces.
         Register stencil_ref_mask_reg;
@@ -1596,18 +1530,23 @@ bool PipelineCache::GetCurrentStateDescription(
             regs.Get<reg::RB_STENCILREFMASK>(stencil_ref_mask_reg);
         description_out.stencil_read_mask = stencil_ref_mask.stencilmask;
         description_out.stencil_write_mask = stencil_ref_mask.stencilwritemask;
-        description_out.stencil_front_fail_op = rb_depthcontrol.stencilfail;
+        description_out.stencil_front_fail_op =
+            normalized_depth_control.stencilfail;
         description_out.stencil_front_depth_fail_op =
-            rb_depthcontrol.stencilzfail;
-        description_out.stencil_front_pass_op = rb_depthcontrol.stencilzpass;
-        description_out.stencil_front_func = rb_depthcontrol.stencilfunc;
+            normalized_depth_control.stencilzfail;
+        description_out.stencil_front_pass_op =
+            normalized_depth_control.stencilzpass;
+        description_out.stencil_front_func =
+            normalized_depth_control.stencilfunc;
         if (stencil_backface_enable) {
-          description_out.stencil_back_fail_op = rb_depthcontrol.stencilfail_bf;
+          description_out.stencil_back_fail_op =
+              normalized_depth_control.stencilfail_bf;
           description_out.stencil_back_depth_fail_op =
-              rb_depthcontrol.stencilzfail_bf;
+              normalized_depth_control.stencilzfail_bf;
           description_out.stencil_back_pass_op =
-              rb_depthcontrol.stencilzpass_bf;
-          description_out.stencil_back_func = rb_depthcontrol.stencilfunc_bf;
+              normalized_depth_control.stencilzpass_bf;
+          description_out.stencil_back_func =
+              normalized_depth_control.stencilfunc_bf;
         } else {
           description_out.stencil_back_fail_op =
               description_out.stencil_front_fail_op;
@@ -1632,10 +1571,6 @@ bool PipelineCache::GetCurrentStateDescription(
 
     // Render targets and blending state. 32 because of 0x1F mask, for safety
     // (all unknown to zero).
-    uint32_t color_mask =
-        pixel_shader ? command_processor_.GetCurrentColorMask(
-                           pixel_shader->shader().writes_color_targets())
-                     : 0;
     static const PipelineBlendFactor kBlendFactorMap[32] = {
         /*  0 */ PipelineBlendFactor::kZero,
         /*  1 */ PipelineBlendFactor::kOne,
@@ -1660,7 +1595,8 @@ bool PipelineCache::GetCurrentStateDescription(
         /* 16 */ PipelineBlendFactor::kSrcAlphaSat,
     };
     // Like kBlendFactorMap, but with color modes changed to alpha. Some
-    // pipelines aren't created in Prey because a color mode is used for alpha.
+    // pipelines aren't created in 545407E0 because a color mode is used for
+    // alpha.
     static const PipelineBlendFactor kBlendFactorAlphaMap[32] = {
         /*  0 */ PipelineBlendFactor::kZero,
         /*  1 */ PipelineBlendFactor::kOne,
@@ -1692,7 +1628,7 @@ bool PipelineCache::GetCurrentStateDescription(
     // have their sample count matching the one set in the pipeline - however if
     // we set NumRenderTargets to 0 and also disable depth / stencil, the sample
     // count must be set to 1 - while the command list may still have
-    // multisampled render targets bound (happens in Halo 3 main menu).
+    // multisampled render targets bound (happens in 4D5307E6 main menu).
     // TODO(Triang3l): Investigate interaction of OMSetRenderTargets with
     // non-null depth and DSVFormat DXGI_FORMAT_UNKNOWN in the same case.
     for (uint32_t i = 0; i < 4; ++i) {
@@ -1706,8 +1642,7 @@ bool PipelineCache::GetCurrentStateDescription(
           reg::RB_COLOR_INFO::rt_register_indices[i]);
       rt.format = xenos::ColorRenderTargetFormat(
           bound_depth_and_color_render_target_formats[1 + i]);
-      // TODO(Triang3l): Normalize unused bits of the color write mask.
-      rt.write_mask = (color_mask >> (i * 4)) & 0xF;
+      rt.write_mask = (normalized_color_mask >> (i * 4)) & 0xF;
       if (rt.write_mask) {
         auto blendcontrol = regs.Get<reg::RB_BLENDCONTROL>(
             reg::RB_BLENDCONTROL::rt_register_indices[i]);
@@ -1752,6 +1687,1115 @@ bool PipelineCache::GetCurrentStateDescription(
   description_out.host_msaa_samples = host_msaa_samples;
 
   return true;
+}
+
+bool PipelineCache::GetGeometryShaderKey(
+    PipelineGeometryShader geometry_shader_type,
+    DxbcShaderTranslator::Modification vertex_shader_modification,
+    DxbcShaderTranslator::Modification pixel_shader_modification,
+    GeometryShaderKey& key_out) {
+  if (geometry_shader_type == PipelineGeometryShader::kNone) {
+    return false;
+  }
+  assert_true(vertex_shader_modification.vertex.interpolator_mask ==
+              pixel_shader_modification.pixel.interpolator_mask);
+  GeometryShaderKey key;
+  key.type = geometry_shader_type;
+  key.interpolator_count =
+      xe::bit_count(vertex_shader_modification.vertex.interpolator_mask);
+  key.user_clip_plane_count =
+      vertex_shader_modification.vertex.user_clip_plane_count;
+  key.user_clip_plane_cull =
+      vertex_shader_modification.vertex.user_clip_plane_cull;
+  key.has_vertex_kill_and = vertex_shader_modification.vertex.vertex_kill_and;
+  key.has_point_size = vertex_shader_modification.vertex.output_point_size;
+  key.has_point_coordinates = pixel_shader_modification.pixel.param_gen_point;
+  key_out = key;
+  return true;
+}
+
+void PipelineCache::CreateDxbcGeometryShader(
+    GeometryShaderKey key, std::vector<uint32_t>& shader_out) {
+  shader_out.clear();
+
+  // RDEF, ISGN, OSG5, SHEX, STAT.
+  constexpr uint32_t kBlobCount = 5;
+
+  // Allocate space for the container header and the blob offsets.
+  shader_out.resize(sizeof(dxbc::ContainerHeader) / sizeof(uint32_t) +
+                    kBlobCount);
+  uint32_t blob_offset_position_dwords =
+      sizeof(dxbc::ContainerHeader) / sizeof(uint32_t);
+  uint32_t blob_position_dwords = uint32_t(shader_out.size());
+  constexpr uint32_t kBlobHeaderSizeDwords =
+      sizeof(dxbc::BlobHeader) / sizeof(uint32_t);
+
+  uint32_t name_ptr;
+
+  // ***************************************************************************
+  // Resource definition
+  // ***************************************************************************
+
+  shader_out[blob_offset_position_dwords] =
+      uint32_t(blob_position_dwords * sizeof(uint32_t));
+  uint32_t rdef_position_dwords = blob_position_dwords + kBlobHeaderSizeDwords;
+  // Not needed, as the next operation done is resize, to allocate the space for
+  // both the blob header and the resource definition header.
+  // shader_out.resize(rdef_position_dwords);
+
+  // RDEF header - the actual definitions will be written if needed.
+  shader_out.resize(rdef_position_dwords +
+                    sizeof(dxbc::RdefHeader) / sizeof(uint32_t));
+  // Generator name.
+  dxbc::AppendAlignedString(shader_out, "Xenia");
+  {
+    auto& rdef_header = *reinterpret_cast<dxbc::RdefHeader*>(
+        shader_out.data() + rdef_position_dwords);
+    rdef_header.shader_model = dxbc::RdefShaderModel::kGeometryShader5_1;
+    rdef_header.compile_flags =
+        dxbc::kCompileFlagNoPreshader | dxbc::kCompileFlagPreferFlowControl |
+        dxbc::kCompileFlagIeeeStrictness | dxbc::kCompileFlagAllResourcesBound;
+    // Generator name is right after the header.
+    rdef_header.generator_name_ptr = sizeof(dxbc::RdefHeader);
+    rdef_header.fourcc = dxbc::RdefHeader::FourCC::k5_1;
+    rdef_header.InitializeSizes();
+  }
+
+  uint32_t system_cbuffer_size_vector_aligned_bytes = 0;
+
+  if (key.type == PipelineGeometryShader::kPointList) {
+    // Need point parameters from the system constants.
+
+    // Constant types - float2 only.
+    // Names.
+    name_ptr =
+        uint32_t((shader_out.size() - rdef_position_dwords) * sizeof(uint32_t));
+    uint32_t rdef_name_ptr_float2 = name_ptr;
+    name_ptr += dxbc::AppendAlignedString(shader_out, "float2");
+    // Types.
+    uint32_t rdef_type_float2_position_dwords = uint32_t(shader_out.size());
+    uint32_t rdef_type_float2_ptr =
+        uint32_t((rdef_type_float2_position_dwords - rdef_position_dwords) *
+                 sizeof(uint32_t));
+    shader_out.resize(rdef_type_float2_position_dwords +
+                      sizeof(dxbc::RdefType) / sizeof(uint32_t));
+    {
+      auto& rdef_type_float2 = *reinterpret_cast<dxbc::RdefType*>(
+          shader_out.data() + rdef_type_float2_position_dwords);
+      rdef_type_float2.variable_class = dxbc::RdefVariableClass::kVector;
+      rdef_type_float2.variable_type = dxbc::RdefVariableType::kFloat;
+      rdef_type_float2.row_count = 1;
+      rdef_type_float2.column_count = 2;
+      rdef_type_float2.name_ptr = rdef_name_ptr_float2;
+    }
+
+    // Constants:
+    // - float2 xe_point_constant_diameter
+    // - float2 xe_point_screen_diameter_to_ndc_radius
+    enum PointConstant : uint32_t {
+      kPointConstantConstantDiameter,
+      kPointConstantScreenDiameterToNDCRadius,
+      kPointConstantCount,
+    };
+    // Names.
+    name_ptr =
+        uint32_t((shader_out.size() - rdef_position_dwords) * sizeof(uint32_t));
+    uint32_t rdef_name_ptr_xe_point_constant_diameter = name_ptr;
+    name_ptr +=
+        dxbc::AppendAlignedString(shader_out, "xe_point_constant_diameter");
+    uint32_t rdef_name_ptr_xe_point_screen_diameter_to_ndc_radius = name_ptr;
+    name_ptr += dxbc::AppendAlignedString(
+        shader_out, "xe_point_screen_diameter_to_ndc_radius");
+    // Constants.
+    uint32_t rdef_constants_position_dwords = uint32_t(shader_out.size());
+    uint32_t rdef_constants_ptr =
+        uint32_t((rdef_constants_position_dwords - rdef_position_dwords) *
+                 sizeof(uint32_t));
+    shader_out.resize(rdef_constants_position_dwords +
+                      sizeof(dxbc::RdefVariable) / sizeof(uint32_t) *
+                          kPointConstantCount);
+    {
+      auto rdef_constants = reinterpret_cast<dxbc::RdefVariable*>(
+          shader_out.data() + rdef_constants_position_dwords);
+      // float2 xe_point_constant_diameter
+      static_assert(
+          sizeof(DxbcShaderTranslator::SystemConstants ::
+                     point_constant_diameter) == sizeof(float) * 2,
+          "DxbcShaderTranslator point_constant_diameter system constant size "
+          "differs between the shader translator and geometry shader "
+          "generation");
+      static_assert_size(
+          DxbcShaderTranslator::SystemConstants::point_constant_diameter,
+          sizeof(float) * 2);
+      dxbc::RdefVariable& rdef_constant_point_constant_diameter =
+          rdef_constants[kPointConstantConstantDiameter];
+      rdef_constant_point_constant_diameter.name_ptr =
+          rdef_name_ptr_xe_point_constant_diameter;
+      rdef_constant_point_constant_diameter.start_offset_bytes = offsetof(
+          DxbcShaderTranslator::SystemConstants, point_constant_diameter);
+      rdef_constant_point_constant_diameter.size_bytes = sizeof(float) * 2;
+      rdef_constant_point_constant_diameter.flags = dxbc::kRdefVariableFlagUsed;
+      rdef_constant_point_constant_diameter.type_ptr = rdef_type_float2_ptr;
+      rdef_constant_point_constant_diameter.start_texture = UINT32_MAX;
+      rdef_constant_point_constant_diameter.start_sampler = UINT32_MAX;
+      // float2 xe_point_screen_diameter_to_ndc_radius
+      static_assert(
+          sizeof(DxbcShaderTranslator::SystemConstants ::
+                     point_screen_diameter_to_ndc_radius) == sizeof(float) * 2,
+          "DxbcShaderTranslator point_screen_diameter_to_ndc_radius system "
+          "constant size differs between the shader translator and geometry "
+          "shader generation");
+      dxbc::RdefVariable& rdef_constant_point_screen_diameter_to_ndc_radius =
+          rdef_constants[kPointConstantScreenDiameterToNDCRadius];
+      rdef_constant_point_screen_diameter_to_ndc_radius.name_ptr =
+          rdef_name_ptr_xe_point_screen_diameter_to_ndc_radius;
+      rdef_constant_point_screen_diameter_to_ndc_radius.start_offset_bytes =
+          offsetof(DxbcShaderTranslator::SystemConstants,
+                   point_screen_diameter_to_ndc_radius);
+      rdef_constant_point_screen_diameter_to_ndc_radius.size_bytes =
+          sizeof(float) * 2;
+      rdef_constant_point_screen_diameter_to_ndc_radius.flags =
+          dxbc::kRdefVariableFlagUsed;
+      rdef_constant_point_screen_diameter_to_ndc_radius.type_ptr =
+          rdef_type_float2_ptr;
+      rdef_constant_point_screen_diameter_to_ndc_radius.start_texture =
+          UINT32_MAX;
+      rdef_constant_point_screen_diameter_to_ndc_radius.start_sampler =
+          UINT32_MAX;
+    }
+
+    // Constant buffers - xe_system_cbuffer only.
+
+    // Names.
+    name_ptr =
+        uint32_t((shader_out.size() - rdef_position_dwords) * sizeof(uint32_t));
+    uint32_t rdef_name_ptr_xe_system_cbuffer = name_ptr;
+    name_ptr += dxbc::AppendAlignedString(shader_out, "xe_system_cbuffer");
+    // Constant buffers.
+    uint32_t rdef_cbuffer_position_dwords = uint32_t(shader_out.size());
+    shader_out.resize(rdef_cbuffer_position_dwords +
+                      sizeof(dxbc::RdefCbuffer) / sizeof(uint32_t));
+    {
+      auto& rdef_cbuffer_system = *reinterpret_cast<dxbc::RdefCbuffer*>(
+          shader_out.data() + rdef_cbuffer_position_dwords);
+      rdef_cbuffer_system.name_ptr = rdef_name_ptr_xe_system_cbuffer;
+      rdef_cbuffer_system.variable_count = kPointConstantCount;
+      rdef_cbuffer_system.variables_ptr = rdef_constants_ptr;
+      auto rdef_constants = reinterpret_cast<const dxbc::RdefVariable*>(
+          shader_out.data() + rdef_constants_position_dwords);
+      for (uint32_t i = 0; i < kPointConstantCount; ++i) {
+        system_cbuffer_size_vector_aligned_bytes =
+            std::max(system_cbuffer_size_vector_aligned_bytes,
+                     rdef_constants[i].start_offset_bytes +
+                         rdef_constants[i].size_bytes);
+      }
+      system_cbuffer_size_vector_aligned_bytes =
+          xe::align(system_cbuffer_size_vector_aligned_bytes,
+                    uint32_t(sizeof(uint32_t) * 4));
+      rdef_cbuffer_system.size_vector_aligned_bytes =
+          system_cbuffer_size_vector_aligned_bytes;
+    }
+
+    // Bindings - xe_system_cbuffer only.
+    uint32_t rdef_binding_position_dwords = uint32_t(shader_out.size());
+    shader_out.resize(rdef_binding_position_dwords +
+                      sizeof(dxbc::RdefInputBind) / sizeof(uint32_t));
+    {
+      auto& rdef_binding_cbuffer_system =
+          *reinterpret_cast<dxbc::RdefInputBind*>(shader_out.data() +
+                                                  rdef_binding_position_dwords);
+      rdef_binding_cbuffer_system.name_ptr = rdef_name_ptr_xe_system_cbuffer;
+      rdef_binding_cbuffer_system.type = dxbc::RdefInputType::kCbuffer;
+      rdef_binding_cbuffer_system.bind_point =
+          uint32_t(DxbcShaderTranslator::CbufferRegister::kSystemConstants);
+      rdef_binding_cbuffer_system.bind_count = 1;
+      rdef_binding_cbuffer_system.flags = dxbc::kRdefInputFlagUserPacked;
+    }
+
+    // Pointers in the header.
+    {
+      auto& rdef_header = *reinterpret_cast<dxbc::RdefHeader*>(
+          shader_out.data() + rdef_position_dwords);
+      rdef_header.cbuffer_count = 1;
+      rdef_header.cbuffers_ptr =
+          uint32_t((rdef_cbuffer_position_dwords - rdef_position_dwords) *
+                   sizeof(uint32_t));
+      rdef_header.input_bind_count = 1;
+      rdef_header.input_binds_ptr =
+          uint32_t((rdef_binding_position_dwords - rdef_position_dwords) *
+                   sizeof(uint32_t));
+    }
+  }
+
+  {
+    auto& blob_header = *reinterpret_cast<dxbc::BlobHeader*>(
+        shader_out.data() + blob_position_dwords);
+    blob_header.fourcc = dxbc::BlobHeader::FourCC::kResourceDefinition;
+    blob_position_dwords = uint32_t(shader_out.size());
+    blob_header.size_bytes =
+        (blob_position_dwords - kBlobHeaderSizeDwords) * sizeof(uint32_t) -
+        shader_out[blob_offset_position_dwords++];
+  }
+
+  // ***************************************************************************
+  // Input signature
+  // ***************************************************************************
+
+  // Clip and cull distances are tightly packed together into registers, but
+  // have separate signature parameters with each being a vec4-aligned window.
+  uint32_t input_clip_distance_count =
+      key.user_clip_plane_cull ? 0 : key.user_clip_plane_count;
+  uint32_t input_cull_distance_count =
+      (key.user_clip_plane_cull ? key.user_clip_plane_count : 0) +
+      key.has_vertex_kill_and;
+  uint32_t input_clip_and_cull_distance_count =
+      input_clip_distance_count + input_cull_distance_count;
+
+  // Interpolators, position, clip and cull distances (parameters containing
+  // only clip or cull distances, and also one parameter containing both if
+  // present), point size.
+  uint32_t isgn_parameter_count =
+      key.interpolator_count + 1 +
+      ((input_clip_and_cull_distance_count + 3) / 4) +
+      uint32_t(input_cull_distance_count &&
+               (input_clip_distance_count & 3) != 0) +
+      key.has_point_size;
+
+  // Reserve space for the header and the parameters.
+  shader_out[blob_offset_position_dwords] =
+      uint32_t(blob_position_dwords * sizeof(uint32_t));
+  uint32_t isgn_position_dwords = blob_position_dwords + kBlobHeaderSizeDwords;
+  shader_out.resize(isgn_position_dwords +
+                    sizeof(dxbc::Signature) / sizeof(uint32_t) +
+                    sizeof(dxbc::SignatureParameter) / sizeof(uint32_t) *
+                        isgn_parameter_count);
+
+  // Names (after the parameters).
+  name_ptr =
+      uint32_t((shader_out.size() - isgn_position_dwords) * sizeof(uint32_t));
+  uint32_t isgn_name_ptr_texcoord = name_ptr;
+  if (key.interpolator_count) {
+    name_ptr += dxbc::AppendAlignedString(shader_out, "TEXCOORD");
+  }
+  uint32_t isgn_name_ptr_sv_position = name_ptr;
+  name_ptr += dxbc::AppendAlignedString(shader_out, "SV_Position");
+  uint32_t isgn_name_ptr_sv_clip_distance = name_ptr;
+  if (input_clip_distance_count) {
+    name_ptr += dxbc::AppendAlignedString(shader_out, "SV_ClipDistance");
+  }
+  uint32_t isgn_name_ptr_sv_cull_distance = name_ptr;
+  if (input_cull_distance_count) {
+    name_ptr += dxbc::AppendAlignedString(shader_out, "SV_CullDistance");
+  }
+  uint32_t isgn_name_ptr_xepsize = name_ptr;
+  if (key.has_point_size) {
+    name_ptr += dxbc::AppendAlignedString(shader_out, "XEPSIZE");
+  }
+
+  // Header and parameters.
+  uint32_t input_register_interpolators = UINT32_MAX;
+  uint32_t input_register_position;
+  uint32_t input_register_clip_and_cull_distances = UINT32_MAX;
+  uint32_t input_register_point_size = UINT32_MAX;
+  {
+    // Header.
+    auto& isgn_header = *reinterpret_cast<dxbc::Signature*>(
+        shader_out.data() + isgn_position_dwords);
+    isgn_header.parameter_count = isgn_parameter_count;
+    isgn_header.parameter_info_ptr = sizeof(dxbc::Signature);
+
+    // Parameters.
+    auto isgn_parameters = reinterpret_cast<dxbc::SignatureParameter*>(
+        shader_out.data() + isgn_position_dwords +
+        sizeof(dxbc::Signature) / sizeof(uint32_t));
+    uint32_t isgn_parameter_index = 0;
+    uint32_t input_register_index = 0;
+
+    // Interpolators (TEXCOORD#).
+    if (key.interpolator_count) {
+      input_register_interpolators = input_register_index;
+      for (uint32_t i = 0; i < key.interpolator_count; ++i) {
+        assert_true(isgn_parameter_index < isgn_parameter_count);
+        dxbc::SignatureParameter& isgn_interpolator =
+            isgn_parameters[isgn_parameter_index++];
+        isgn_interpolator.semantic_name_ptr = isgn_name_ptr_texcoord;
+        isgn_interpolator.semantic_index = i;
+        isgn_interpolator.component_type =
+            dxbc::SignatureRegisterComponentType::kFloat32;
+        isgn_interpolator.register_index = input_register_index++;
+        isgn_interpolator.mask = 0b1111;
+        isgn_interpolator.always_reads_mask = 0b1111;
+      }
+    }
+
+    // Position (SV_Position).
+    input_register_position = input_register_index;
+    assert_true(isgn_parameter_index < isgn_parameter_count);
+    dxbc::SignatureParameter& isgn_sv_position =
+        isgn_parameters[isgn_parameter_index++];
+    isgn_sv_position.semantic_name_ptr = isgn_name_ptr_sv_position;
+    isgn_sv_position.system_value = dxbc::Name::kPosition;
+    isgn_sv_position.component_type =
+        dxbc::SignatureRegisterComponentType::kFloat32;
+    isgn_sv_position.register_index = input_register_index++;
+    isgn_sv_position.mask = 0b1111;
+    isgn_sv_position.always_reads_mask = 0b1111;
+
+    // Clip and cull distances (SV_ClipDistance#, SV_CullDistance#).
+    if (input_clip_and_cull_distance_count) {
+      input_register_clip_and_cull_distances = input_register_index;
+      uint32_t isgn_cull_distance_semantic_index = 0;
+      for (uint32_t i = 0; i < input_clip_and_cull_distance_count; i += 4) {
+        if (i < input_clip_distance_count) {
+          dxbc::SignatureParameter& isgn_sv_clip_distance =
+              isgn_parameters[isgn_parameter_index++];
+          isgn_sv_clip_distance.semantic_name_ptr =
+              isgn_name_ptr_sv_clip_distance;
+          isgn_sv_clip_distance.semantic_index = i / 4;
+          isgn_sv_clip_distance.system_value = dxbc::Name::kClipDistance;
+          isgn_sv_clip_distance.component_type =
+              dxbc::SignatureRegisterComponentType::kFloat32;
+          isgn_sv_clip_distance.register_index = input_register_index;
+          uint8_t isgn_sv_clip_distance_mask =
+              (UINT8_C(1) << std::min(input_clip_distance_count - i,
+                                      UINT32_C(4))) -
+              1;
+          isgn_sv_clip_distance.mask = isgn_sv_clip_distance_mask;
+          isgn_sv_clip_distance.always_reads_mask = isgn_sv_clip_distance_mask;
+        }
+        if (input_cull_distance_count && i + 4 > input_clip_distance_count) {
+          dxbc::SignatureParameter& isgn_sv_cull_distance =
+              isgn_parameters[isgn_parameter_index++];
+          isgn_sv_cull_distance.semantic_name_ptr =
+              isgn_name_ptr_sv_cull_distance;
+          isgn_sv_cull_distance.semantic_index =
+              isgn_cull_distance_semantic_index++;
+          isgn_sv_cull_distance.system_value = dxbc::Name::kCullDistance;
+          isgn_sv_cull_distance.component_type =
+              dxbc::SignatureRegisterComponentType::kFloat32;
+          isgn_sv_cull_distance.register_index = input_register_index;
+          uint8_t isgn_sv_cull_distance_mask =
+              (UINT8_C(1) << std::min(input_clip_and_cull_distance_count - i,
+                                      UINT32_C(4))) -
+              1;
+          if (i < input_clip_distance_count) {
+            isgn_sv_cull_distance_mask &=
+                ~((UINT8_C(1) << (input_clip_distance_count - i)) - 1);
+          }
+          isgn_sv_cull_distance.mask = isgn_sv_cull_distance_mask;
+          isgn_sv_cull_distance.always_reads_mask = isgn_sv_cull_distance_mask;
+        }
+        ++input_register_index;
+      }
+    }
+
+    // Point size (XEPSIZE).
+    if (key.has_point_size) {
+      input_register_point_size = input_register_index;
+      assert_true(isgn_parameter_index < isgn_parameter_count);
+      dxbc::SignatureParameter& isgn_point_size =
+          isgn_parameters[isgn_parameter_index++];
+      isgn_point_size.semantic_name_ptr = isgn_name_ptr_xepsize;
+      isgn_point_size.component_type =
+          dxbc::SignatureRegisterComponentType::kFloat32;
+      isgn_point_size.register_index = input_register_index++;
+      isgn_point_size.mask = 0b0001;
+      isgn_point_size.always_reads_mask =
+          key.type == PipelineGeometryShader::kPointList ? 0b0001 : 0;
+    }
+
+    assert_true(isgn_parameter_index == isgn_parameter_count);
+  }
+
+  {
+    auto& blob_header = *reinterpret_cast<dxbc::BlobHeader*>(
+        shader_out.data() + blob_position_dwords);
+    blob_header.fourcc = dxbc::BlobHeader::FourCC::kInputSignature;
+    blob_position_dwords = uint32_t(shader_out.size());
+    blob_header.size_bytes =
+        (blob_position_dwords - kBlobHeaderSizeDwords) * sizeof(uint32_t) -
+        shader_out[blob_offset_position_dwords++];
+  }
+
+  // ***************************************************************************
+  // Output signature
+  // ***************************************************************************
+
+  // Interpolators, point coordinates, position, clip distances.
+  uint32_t osgn_parameter_count = key.interpolator_count +
+                                  key.has_point_coordinates + 1 +
+                                  ((input_clip_distance_count + 3) / 4);
+
+  // Reserve space for the header and the parameters.
+  shader_out[blob_offset_position_dwords] =
+      uint32_t(blob_position_dwords * sizeof(uint32_t));
+  uint32_t osgn_position_dwords = blob_position_dwords + kBlobHeaderSizeDwords;
+  shader_out.resize(osgn_position_dwords +
+                    sizeof(dxbc::Signature) / sizeof(uint32_t) +
+                    sizeof(dxbc::SignatureParameterForGS) / sizeof(uint32_t) *
+                        osgn_parameter_count);
+
+  // Names (after the parameters).
+  name_ptr =
+      uint32_t((shader_out.size() - osgn_position_dwords) * sizeof(uint32_t));
+  uint32_t osgn_name_ptr_texcoord = name_ptr;
+  if (key.interpolator_count) {
+    name_ptr += dxbc::AppendAlignedString(shader_out, "TEXCOORD");
+  }
+  uint32_t osgn_name_ptr_xespritetexcoord = name_ptr;
+  if (key.has_point_coordinates) {
+    name_ptr += dxbc::AppendAlignedString(shader_out, "XESPRITETEXCOORD");
+  }
+  uint32_t osgn_name_ptr_sv_position = name_ptr;
+  name_ptr += dxbc::AppendAlignedString(shader_out, "SV_Position");
+  uint32_t osgn_name_ptr_sv_clip_distance = name_ptr;
+  if (input_clip_distance_count) {
+    name_ptr += dxbc::AppendAlignedString(shader_out, "SV_ClipDistance");
+  }
+
+  // Header and parameters.
+  uint32_t output_register_interpolators = UINT32_MAX;
+  uint32_t output_register_point_coordinates = UINT32_MAX;
+  uint32_t output_register_position;
+  uint32_t output_register_clip_distances = UINT32_MAX;
+  {
+    // Header.
+    auto& osgn_header = *reinterpret_cast<dxbc::Signature*>(
+        shader_out.data() + osgn_position_dwords);
+    osgn_header.parameter_count = osgn_parameter_count;
+    osgn_header.parameter_info_ptr = sizeof(dxbc::Signature);
+
+    // Parameters.
+    auto osgn_parameters = reinterpret_cast<dxbc::SignatureParameterForGS*>(
+        shader_out.data() + osgn_position_dwords +
+        sizeof(dxbc::Signature) / sizeof(uint32_t));
+    uint32_t osgn_parameter_index = 0;
+    uint32_t output_register_index = 0;
+
+    // Interpolators (TEXCOORD#).
+    if (key.interpolator_count) {
+      output_register_interpolators = output_register_index;
+      for (uint32_t i = 0; i < key.interpolator_count; ++i) {
+        assert_true(osgn_parameter_index < osgn_parameter_count);
+        dxbc::SignatureParameterForGS& osgn_interpolator =
+            osgn_parameters[osgn_parameter_index++];
+        osgn_interpolator.semantic_name_ptr = osgn_name_ptr_texcoord;
+        osgn_interpolator.semantic_index = i;
+        osgn_interpolator.component_type =
+            dxbc::SignatureRegisterComponentType::kFloat32;
+        osgn_interpolator.register_index = output_register_index++;
+        osgn_interpolator.mask = 0b1111;
+      }
+    }
+
+    // Point coordinates (XESPRITETEXCOORD).
+    if (key.has_point_coordinates) {
+      output_register_point_coordinates = output_register_index;
+      assert_true(osgn_parameter_index < osgn_parameter_count);
+      dxbc::SignatureParameterForGS& osgn_point_coordinates =
+          osgn_parameters[osgn_parameter_index++];
+      osgn_point_coordinates.semantic_name_ptr = osgn_name_ptr_xespritetexcoord;
+      osgn_point_coordinates.component_type =
+          dxbc::SignatureRegisterComponentType::kFloat32;
+      osgn_point_coordinates.register_index = output_register_index++;
+      osgn_point_coordinates.mask = 0b0011;
+      osgn_point_coordinates.never_writes_mask = 0b1100;
+    }
+
+    // Position (SV_Position).
+    output_register_position = output_register_index;
+    assert_true(osgn_parameter_index < osgn_parameter_count);
+    dxbc::SignatureParameterForGS& osgn_sv_position =
+        osgn_parameters[osgn_parameter_index++];
+    osgn_sv_position.semantic_name_ptr = osgn_name_ptr_sv_position;
+    osgn_sv_position.system_value = dxbc::Name::kPosition;
+    osgn_sv_position.component_type =
+        dxbc::SignatureRegisterComponentType::kFloat32;
+    osgn_sv_position.register_index = output_register_index++;
+    osgn_sv_position.mask = 0b1111;
+
+    // Clip distances (SV_ClipDistance#).
+    if (input_clip_distance_count) {
+      output_register_clip_distances = output_register_index;
+      for (uint32_t i = 0; i < input_clip_distance_count; i += 4) {
+        dxbc::SignatureParameterForGS& osgn_sv_clip_distance =
+            osgn_parameters[osgn_parameter_index++];
+        osgn_sv_clip_distance.semantic_name_ptr =
+            osgn_name_ptr_sv_clip_distance;
+        osgn_sv_clip_distance.semantic_index = i / 4;
+        osgn_sv_clip_distance.system_value = dxbc::Name::kClipDistance;
+        osgn_sv_clip_distance.component_type =
+            dxbc::SignatureRegisterComponentType::kFloat32;
+        osgn_sv_clip_distance.register_index = output_register_index++;
+        uint8_t osgn_sv_clip_distance_mask =
+            (UINT8_C(1) << std::min(input_clip_distance_count - i,
+                                    UINT32_C(4))) -
+            1;
+        osgn_sv_clip_distance.mask = osgn_sv_clip_distance_mask;
+        osgn_sv_clip_distance.never_writes_mask =
+            osgn_sv_clip_distance_mask ^ 0b1111;
+      }
+    }
+
+    assert_true(osgn_parameter_index == osgn_parameter_count);
+  }
+
+  {
+    auto& blob_header = *reinterpret_cast<dxbc::BlobHeader*>(
+        shader_out.data() + blob_position_dwords);
+    blob_header.fourcc = dxbc::BlobHeader::FourCC::kOutputSignatureForGS;
+    blob_position_dwords = uint32_t(shader_out.size());
+    blob_header.size_bytes =
+        (blob_position_dwords - kBlobHeaderSizeDwords) * sizeof(uint32_t) -
+        shader_out[blob_offset_position_dwords++];
+  }
+
+  // ***************************************************************************
+  // Shader program
+  // ***************************************************************************
+
+  shader_out[blob_offset_position_dwords] =
+      uint32_t(blob_position_dwords * sizeof(uint32_t));
+  uint32_t shex_position_dwords = blob_position_dwords + kBlobHeaderSizeDwords;
+  shader_out.resize(shex_position_dwords);
+
+  shader_out.push_back(
+      dxbc::VersionToken(dxbc::ProgramType::kGeometryShader, 5, 1));
+  // Reserve space for the length token.
+  shader_out.push_back(0);
+
+  dxbc::Statistics stat;
+  std::memset(&stat, 0, sizeof(dxbc::Statistics));
+  dxbc::Assembler a(shader_out, stat);
+
+  a.OpDclGlobalFlags(dxbc::kGlobalFlagAllResourcesBound);
+
+  if (system_cbuffer_size_vector_aligned_bytes) {
+    a.OpDclConstantBuffer(
+        dxbc::Src::CB(
+            dxbc::Src::Dcl, 0,
+            uint32_t(DxbcShaderTranslator::CbufferRegister::kSystemConstants),
+            uint32_t(DxbcShaderTranslator::CbufferRegister::kSystemConstants)),
+        system_cbuffer_size_vector_aligned_bytes / (sizeof(uint32_t) * 4));
+  }
+
+  dxbc::Primitive input_primitive = dxbc::Primitive::kUndefined;
+  uint32_t input_primitive_vertex_count = 0;
+  dxbc::PrimitiveTopology output_primitive_topology =
+      dxbc::PrimitiveTopology::kUndefined;
+  uint32_t max_output_vertex_count = 0;
+  switch (key.type) {
+    case PipelineGeometryShader::kPointList:
+      // Point to a strip of 2 triangles.
+      input_primitive = dxbc::Primitive::kPoint;
+      input_primitive_vertex_count = 1;
+      output_primitive_topology = dxbc::PrimitiveTopology::kTriangleStrip;
+      max_output_vertex_count = 4;
+      break;
+    case PipelineGeometryShader::kRectangleList:
+      // Triangle to a strip of 2 triangles.
+      input_primitive = dxbc::Primitive::kTriangle;
+      input_primitive_vertex_count = 3;
+      output_primitive_topology = dxbc::PrimitiveTopology::kTriangleStrip;
+      max_output_vertex_count = 4;
+      break;
+    case PipelineGeometryShader::kQuadList:
+      // 4 vertices passed via kLineWithAdjacency to a strip of 2 triangles.
+      input_primitive = dxbc::Primitive::kLineWithAdjacency;
+      input_primitive_vertex_count = 4;
+      output_primitive_topology = dxbc::PrimitiveTopology::kTriangleStrip;
+      max_output_vertex_count = 4;
+      break;
+    default:
+      assert_unhandled_case(key.type);
+  }
+
+  assert_false(key.interpolator_count &&
+               input_register_interpolators == UINT32_MAX);
+  for (uint32_t i = 0; i < key.interpolator_count; ++i) {
+    a.OpDclInput(dxbc::Dest::V2D(input_primitive_vertex_count,
+                                 input_register_interpolators + i));
+  }
+  a.OpDclInputSIV(
+      dxbc::Dest::V2D(input_primitive_vertex_count, input_register_position),
+      dxbc::Name::kPosition);
+  // Clip and cull plane declarations are separate in FXC-generated code even
+  // for a single register.
+  assert_false(input_clip_and_cull_distance_count &&
+               input_register_clip_and_cull_distances == UINT32_MAX);
+  for (uint32_t i = 0; i < input_clip_and_cull_distance_count; i += 4) {
+    if (i < input_clip_distance_count) {
+      a.OpDclInput(
+          dxbc::Dest::V2D(input_primitive_vertex_count,
+                          input_register_clip_and_cull_distances + (i >> 2),
+                          (UINT32_C(1) << std::min(
+                               input_clip_distance_count - i, UINT32_C(4))) -
+                              1));
+    }
+    if (input_cull_distance_count && i + 4 > input_clip_distance_count) {
+      uint32_t cull_distance_mask =
+          (UINT32_C(1) << std::min(input_clip_and_cull_distance_count - i,
+                                   UINT32_C(4))) -
+          1;
+      if (i < input_clip_distance_count) {
+        cull_distance_mask &=
+            ~((UINT32_C(1) << (input_clip_distance_count - i)) - 1);
+      }
+      a.OpDclInput(
+          dxbc::Dest::V2D(input_primitive_vertex_count,
+                          input_register_clip_and_cull_distances + (i >> 2),
+                          cull_distance_mask));
+    }
+  }
+  if (key.has_point_size && key.type == PipelineGeometryShader::kPointList) {
+    assert_true(input_register_point_size != UINT32_MAX);
+    a.OpDclInput(dxbc::Dest::V2D(input_primitive_vertex_count,
+                                 input_register_point_size, 0b0001));
+  }
+
+  // At least 1 temporary register needed to discard primitives with NaN
+  // position.
+  size_t dcl_temps_count_position_dwords = a.OpDclTemps(1);
+
+  a.OpDclInputPrimitive(input_primitive);
+  dxbc::Dest stream(dxbc::Dest::M(0));
+  a.OpDclStream(stream);
+  a.OpDclOutputTopology(output_primitive_topology);
+
+  assert_false(key.interpolator_count &&
+               output_register_interpolators == UINT32_MAX);
+  for (uint32_t i = 0; i < key.interpolator_count; ++i) {
+    a.OpDclOutput(dxbc::Dest::O(output_register_interpolators + i));
+  }
+  if (key.has_point_coordinates) {
+    assert_true(output_register_point_coordinates != UINT32_MAX);
+    a.OpDclOutput(dxbc::Dest::O(output_register_point_coordinates, 0b0011));
+  }
+  a.OpDclOutputSIV(dxbc::Dest::O(output_register_position),
+                   dxbc::Name::kPosition);
+  assert_false(input_clip_distance_count &&
+               output_register_clip_distances == UINT32_MAX);
+  for (uint32_t i = 0; i < input_clip_distance_count; i += 4) {
+    a.OpDclOutputSIV(
+        dxbc::Dest::O(output_register_clip_distances + (i >> 2),
+                      (UINT32_C(1) << std::min(input_clip_distance_count - i,
+                                               UINT32_C(4))) -
+                          1),
+        dxbc::Name::kClipDistance);
+  }
+
+  a.OpDclMaxOutputVertexCount(max_output_vertex_count);
+
+  // Note that after every emit, all o# become initialized and must be written
+  // to again.
+  // Also, FXC generates only movs (from statically or dynamically indexed
+  // v[#][#], from r#, or from a literal) to o# for some reason.
+  // emit_then_cut_stream must not be used - it crashes the shader compiler of
+  // AMD Software: Adrenalin Edition 23.3.2 on RDNA 3 if it's conditional (after
+  // a `retc` or inside an `if`), and it doesn't seem to be generated by FXC or
+  // DXC at all.
+
+  // Discard the whole primitive if any vertex has a NaN position (may also be
+  // set to NaN for emulation of vertex killing with the OR operator).
+  for (uint32_t i = 0; i < input_primitive_vertex_count; ++i) {
+    a.OpNE(dxbc::Dest::R(0), dxbc::Src::V2D(i, input_register_position),
+           dxbc::Src::V2D(i, input_register_position));
+    a.OpOr(dxbc::Dest::R(0, 0b0011), dxbc::Src::R(0, 0b0100),
+           dxbc::Src::R(0, 0b1110));
+    a.OpOr(dxbc::Dest::R(0, 0b0001), dxbc::Src::R(0, dxbc::Src::kXXXX),
+           dxbc::Src::R(0, dxbc::Src::kYYYY));
+    a.OpRetC(true, dxbc::Src::R(0, dxbc::Src::kXXXX));
+  }
+
+  // Cull the whole primitive if any cull distance for all vertices in the
+  // primitive is < 0.
+  // TODO(Triang3l): For points, handle ps_ucp_mode (transform the host clip
+  // space to the guest one, calculate the distances to the user clip planes,
+  // cull using the distance from the center for modes 0, 1 and 2, cull and clip
+  // per-vertex for modes 2 and 3) - except for the vertex kill flag.
+  if (input_cull_distance_count) {
+    for (uint32_t i = 0; i < input_cull_distance_count; ++i) {
+      uint32_t cull_distance_register = input_register_clip_and_cull_distances +
+                                        ((input_clip_distance_count + i) >> 2);
+      uint32_t cull_distance_component = (input_clip_distance_count + i) & 3;
+      a.OpLT(dxbc::Dest::R(0, 0b0001),
+             dxbc::Src::V2D(0, cull_distance_register)
+                 .Select(cull_distance_component),
+             dxbc::Src::LF(0.0f));
+      for (uint32_t j = 1; j < input_primitive_vertex_count; ++j) {
+        a.OpLT(dxbc::Dest::R(0, 0b0010),
+               dxbc::Src::V2D(j, cull_distance_register)
+                   .Select(cull_distance_component),
+               dxbc::Src::LF(0.0f));
+        a.OpAnd(dxbc::Dest::R(0, 0b0001), dxbc::Src::R(0, dxbc::Src::kXXXX),
+                dxbc::Src::R(0, dxbc::Src::kYYYY));
+      }
+      a.OpRetC(true, dxbc::Src::R(0, dxbc::Src::kXXXX));
+    }
+  }
+
+  switch (key.type) {
+    case PipelineGeometryShader::kPointList: {
+      // Expand the point sprite, with left-to-right, top-to-bottom UVs.
+      dxbc::Src point_size_src(dxbc::Src::CB(
+          0, uint32_t(DxbcShaderTranslator::CbufferRegister::kSystemConstants),
+          offsetof(DxbcShaderTranslator::SystemConstants,
+                   point_constant_diameter) >>
+              4,
+          ((offsetof(DxbcShaderTranslator::SystemConstants,
+                     point_constant_diameter[0]) >>
+            2) &
+           3) |
+              (((offsetof(DxbcShaderTranslator::SystemConstants,
+                          point_constant_diameter[1]) >>
+                 2) &
+                3)
+               << 2)));
+      if (key.has_point_size) {
+        // The vertex shader's header writes -1.0 to point_size by default, so
+        // any non-negative value means that it was overwritten by the
+        // translated vertex shader, and needs to be used instead of the
+        // constant size. The per-vertex diameter is already clamped in the
+        // vertex shader (combined with making it non-negative).
+        a.OpGE(dxbc::Dest::R(0, 0b0001),
+               dxbc::Src::V2D(0, input_register_point_size, dxbc::Src::kXXXX),
+               dxbc::Src::LF(0.0f));
+        a.OpMovC(dxbc::Dest::R(0, 0b0011), dxbc::Src::R(0, dxbc::Src::kXXXX),
+                 dxbc::Src::V2D(0, input_register_point_size, dxbc::Src::kXXXX),
+                 point_size_src);
+        point_size_src = dxbc::Src::R(0, 0b0100);
+      }
+      // 4D5307F1 has zero-size snowflakes, drop them quicker, and also drop
+      // points with a constant size of zero since point lists may also be used
+      // as just "compute" with memexport.
+      // XY may contain the point size with the per-vertex override applied, use
+      // Z as temporary.
+      for (uint32_t i = 0; i < 2; ++i) {
+        a.OpLT(dxbc::Dest::R(0, 0b0100), dxbc::Src::LF(0.0f),
+               point_size_src.SelectFromSwizzled(i));
+        a.OpRetC(false, dxbc::Src::R(0, dxbc::Src::kZZZZ));
+      }
+      // Transform the diameter in the guest screen coordinates to radius in the
+      // normalized device coordinates, and then to the clip space by
+      // multiplying by W.
+      a.OpMul(
+          dxbc::Dest::R(0, 0b0011), point_size_src,
+          dxbc::Src::CB(
+              0,
+              uint32_t(DxbcShaderTranslator::CbufferRegister::kSystemConstants),
+              offsetof(DxbcShaderTranslator::SystemConstants,
+                       point_screen_diameter_to_ndc_radius) >>
+                  4,
+              ((offsetof(DxbcShaderTranslator::SystemConstants,
+                         point_screen_diameter_to_ndc_radius[0]) >>
+                2) &
+               3) |
+                  (((offsetof(DxbcShaderTranslator::SystemConstants,
+                              point_screen_diameter_to_ndc_radius[1]) >>
+                     2) &
+                    3)
+                   << 2)));
+      point_size_src = dxbc::Src::R(0, 0b0100);
+      a.OpMul(dxbc::Dest::R(0, 0b0011), point_size_src,
+              dxbc::Src::V2D(0, input_register_position, dxbc::Src::kWWWW));
+      dxbc::Src point_radius_x_src(point_size_src.SelectFromSwizzled(0));
+      dxbc::Src point_radius_y_src(point_size_src.SelectFromSwizzled(1));
+
+      for (uint32_t i = 0; i < 4; ++i) {
+        // Same interpolators for the entire sprite.
+        for (uint32_t j = 0; j < key.interpolator_count; ++j) {
+          a.OpMov(dxbc::Dest::O(output_register_interpolators + j),
+                  dxbc::Src::V2D(0, input_register_interpolators + j));
+        }
+        // Top-left, top-right, bottom-left, bottom-right order (chosen
+        // arbitrarily, simply based on clockwise meaning front with
+        // FrontCounterClockwise = FALSE, but faceness is ignored for
+        // non-polygon primitive types).
+        // Bottom is -Y in Direct3D NDC, +V in point sprite coordinates.
+        if (key.has_point_coordinates) {
+          a.OpMov(dxbc::Dest::O(output_register_point_coordinates, 0b0011),
+                  dxbc::Src::LF(float(i & 1), float(i >> 1), 0.0f, 0.0f));
+        }
+        // FXC generates only `mov`s for o#, use temporary registers (r0.zw, as
+        // r0.xy already used for the point size) for calculations.
+        a.OpAdd(dxbc::Dest::R(0, 0b0100),
+                dxbc::Src::V2D(0, input_register_position, dxbc::Src::kXXXX),
+                (i & 1) ? point_radius_x_src : -point_radius_x_src);
+        a.OpAdd(dxbc::Dest::R(0, 0b1000),
+                dxbc::Src::V2D(0, input_register_position, dxbc::Src::kYYYY),
+                (i >> 1) ? -point_radius_y_src : point_radius_y_src);
+        a.OpMov(dxbc::Dest::O(output_register_position, 0b0011),
+                dxbc::Src::R(0, 0b1110));
+        a.OpMov(dxbc::Dest::O(output_register_position, 0b1100),
+                dxbc::Src::V2D(0, input_register_position));
+        // TODO(Triang3l): Handle ps_ucp_mode properly, clip expanded points if
+        // needed.
+        for (uint32_t j = 0; j < input_clip_distance_count; j += 4) {
+          a.OpMov(
+              dxbc::Dest::O(output_register_clip_distances + (j >> 2),
+                            (UINT32_C(1) << std::min(
+                                 input_clip_distance_count - j, UINT32_C(4))) -
+                                1),
+              dxbc::Src::V2D(
+                  0, input_register_clip_and_cull_distances + (j >> 2)));
+        }
+        a.OpEmitStream(stream);
+      }
+      a.OpCutStream(stream);
+    } break;
+
+    case PipelineGeometryShader::kRectangleList: {
+      // Construct a strip with the fourth vertex generated by mirroring a
+      // vertex across the longest edge (the diagonal).
+      //
+      // Possible options:
+      //
+      // 0---1
+      // |  /|
+      // | / |  - 12 is the longest edge, strip 0123 (most commonly used)
+      // |/  |    v3 = v0 + (v1 - v0) + (v2 - v0), or v3 = -v0 + v1 + v2
+      // 2--[3]
+      //
+      // 1---2
+      // |  /|
+      // | / |  - 20 is the longest edge, strip 1203
+      // |/  |
+      // 0--[3]
+      //
+      // 2---0
+      // |  /|
+      // | / |  - 01 is the longest edge, strip 2013
+      // |/  |
+      // 1--[3]
+      //
+      // Input vertices are implicitly indexable, dcl_indexRange is not needed
+      // for the first dimension of a v[#][#] index.
+
+      // Get squares of edge lengths into r0.xyz to choose the longest edge.
+      // r0.x = ||12||^2
+      a.OpAdd(dxbc::Dest::R(0, 0b0011),
+              dxbc::Src::V2D(2, input_register_position, 0b0100),
+              -dxbc::Src::V2D(1, input_register_position, 0b0100));
+      a.OpDP2(dxbc::Dest::R(0, 0b0001), dxbc::Src::R(0, 0b0100),
+              dxbc::Src::R(0, 0b0100));
+      // r0.y = ||20||^2
+      a.OpAdd(dxbc::Dest::R(0, 0b0110),
+              dxbc::Src::V2D(0, input_register_position, 0b0100 << 2),
+              -dxbc::Src::V2D(2, input_register_position, 0b0100 << 2));
+      a.OpDP2(dxbc::Dest::R(0, 0b0010), dxbc::Src::R(0, 0b1001),
+              dxbc::Src::R(0, 0b1001));
+      // r0.z = ||01||^2
+      a.OpAdd(dxbc::Dest::R(0, 0b1100),
+              dxbc::Src::V2D(1, input_register_position, 0b0100 << 4),
+              -dxbc::Src::V2D(0, input_register_position, 0b0100 << 4));
+      a.OpDP2(dxbc::Dest::R(0, 0b0100), dxbc::Src::R(0, 0b1110),
+              dxbc::Src::R(0, 0b1110));
+
+      // Find the longest edge, and select the strip vertex indices into r0.xyz.
+      // r0.w = 12 > 20
+      a.OpLT(dxbc::Dest::R(0, 0b1000), dxbc::Src::R(0, dxbc::Src::kYYYY),
+             dxbc::Src::R(0, dxbc::Src::kXXXX));
+      // r0.x = 12 > 01
+      a.OpLT(dxbc::Dest::R(0, 0b0001), dxbc::Src::R(0, dxbc::Src::kZZZZ),
+             dxbc::Src::R(0, dxbc::Src::kXXXX));
+      // r0.x = 12 > 20 && 12 > 01
+      a.OpAnd(dxbc::Dest::R(0, 0b0001), dxbc::Src::R(0, dxbc::Src::kWWWW),
+              dxbc::Src::R(0, dxbc::Src::kXXXX));
+      a.OpIf(true, dxbc::Src::R(0, dxbc::Src::kXXXX));
+      {
+        // 12 is the longest edge, the first triangle in the strip is 012.
+        a.OpMov(dxbc::Dest::R(0, 0b0111), dxbc::Src::LU(0, 1, 2, 0));
+      }
+      a.OpElse();
+      {
+        // r0.x = 20 > 01
+        a.OpLT(dxbc::Dest::R(0, 0b0001), dxbc::Src::R(0, dxbc::Src::kZZZZ),
+               dxbc::Src::R(0, dxbc::Src::kYYYY));
+        // If 20 is the longest edge, the first triangle in the strip is 120.
+        // Otherwise, it's 201.
+        a.OpMovC(dxbc::Dest::R(0, 0b0111), dxbc::Src::R(0, dxbc::Src::kXXXX),
+                 dxbc::Src::LU(1, 2, 0, 0), dxbc::Src::LU(2, 0, 1, 0));
+      }
+      a.OpEndIf();
+
+      // Emit the triangle in the strip that consists of the original vertices.
+      for (uint32_t i = 0; i < 3; ++i) {
+        dxbc::Index input_vertex_index(0, i);
+        for (uint32_t j = 0; j < key.interpolator_count; ++j) {
+          a.OpMov(dxbc::Dest::O(output_register_interpolators + j),
+                  dxbc::Src::V2D(input_vertex_index,
+                                 input_register_interpolators + j));
+        }
+        if (key.has_point_coordinates) {
+          a.OpMov(dxbc::Dest::O(output_register_point_coordinates, 0b0011),
+                  dxbc::Src::LF(0.0f));
+        }
+        a.OpMov(dxbc::Dest::O(output_register_position),
+                dxbc::Src::V2D(input_vertex_index, input_register_position));
+        for (uint32_t j = 0; j < input_clip_distance_count; j += 4) {
+          a.OpMov(
+              dxbc::Dest::O(output_register_clip_distances + (j >> 2),
+                            (UINT32_C(1) << std::min(
+                                 input_clip_distance_count - j, UINT32_C(4))) -
+                                1),
+              dxbc::Src::V2D(
+                  input_vertex_index,
+                  input_register_clip_and_cull_distances + (j >> 2)));
+        }
+        a.OpEmitStream(stream);
+      }
+
+      // Construct the fourth vertex using r1 as temporary storage, including
+      // for the final operation as FXC generates only `mov`s for o#.
+      stat.temp_register_count =
+          std::max(UINT32_C(2), stat.temp_register_count);
+      for (uint32_t j = 0; j < key.interpolator_count; ++j) {
+        uint32_t input_register_interpolator = input_register_interpolators + j;
+        a.OpAdd(dxbc::Dest::R(1),
+                -dxbc::Src::V2D(dxbc::Index(0, 0), input_register_interpolator),
+                dxbc::Src::V2D(dxbc::Index(0, 1), input_register_interpolator));
+        a.OpAdd(dxbc::Dest::R(1), dxbc::Src::R(1),
+                dxbc::Src::V2D(dxbc::Index(0, 2), input_register_interpolator));
+        a.OpMov(dxbc::Dest::O(output_register_interpolators + j),
+                dxbc::Src::R(1));
+      }
+      if (key.has_point_coordinates) {
+        a.OpMov(dxbc::Dest::O(output_register_point_coordinates, 0b0011),
+                dxbc::Src::LF(0.0f));
+      }
+      a.OpAdd(dxbc::Dest::R(1),
+              -dxbc::Src::V2D(dxbc::Index(0, 0), input_register_position),
+              dxbc::Src::V2D(dxbc::Index(0, 1), input_register_position));
+      a.OpAdd(dxbc::Dest::R(1), dxbc::Src::R(1),
+              dxbc::Src::V2D(dxbc::Index(0, 2), input_register_position));
+      a.OpMov(dxbc::Dest::O(output_register_position), dxbc::Src::R(1));
+      for (uint32_t j = 0; j < input_clip_distance_count; j += 4) {
+        uint32_t clip_distance_mask =
+            (UINT32_C(1) << std::min(input_clip_distance_count - j,
+                                     UINT32_C(4))) -
+            1;
+        uint32_t input_register_clip_distance =
+            input_register_clip_and_cull_distances + (j >> 2);
+        a.OpAdd(
+            dxbc::Dest::R(1, clip_distance_mask),
+            -dxbc::Src::V2D(dxbc::Index(0, 0), input_register_clip_distance),
+            dxbc::Src::V2D(dxbc::Index(0, 1), input_register_clip_distance));
+        a.OpAdd(
+            dxbc::Dest::R(1, clip_distance_mask), dxbc::Src::R(1),
+            dxbc::Src::V2D(dxbc::Index(0, 2), input_register_clip_distance));
+        a.OpMov(dxbc::Dest::O(output_register_clip_distances + (j >> 2),
+                              clip_distance_mask),
+                dxbc::Src::R(1));
+      }
+      a.OpEmitStream(stream);
+      a.OpCutStream(stream);
+    } break;
+
+    case PipelineGeometryShader::kQuadList: {
+      // Build the triangle strip from the original quad vertices in the
+      // 0, 1, 3, 2 order (like specified for GL_QUAD_STRIP).
+      // TODO(Triang3l): Find the correct decomposition of quads into triangles
+      // on the real hardware.
+      for (uint32_t i = 0; i < 4; ++i) {
+        uint32_t input_vertex_index = i ^ (i >> 1);
+        for (uint32_t j = 0; j < key.interpolator_count; ++j) {
+          a.OpMov(dxbc::Dest::O(output_register_interpolators + j),
+                  dxbc::Src::V2D(input_vertex_index,
+                                 input_register_interpolators + j));
+        }
+        if (key.has_point_coordinates) {
+          a.OpMov(dxbc::Dest::O(output_register_point_coordinates, 0b0011),
+                  dxbc::Src::LF(0.0f));
+        }
+        a.OpMov(dxbc::Dest::O(output_register_position),
+                dxbc::Src::V2D(input_vertex_index, input_register_position));
+        for (uint32_t j = 0; j < input_clip_distance_count; j += 4) {
+          a.OpMov(
+              dxbc::Dest::O(output_register_clip_distances + (j >> 2),
+                            (UINT32_C(1) << std::min(
+                                 input_clip_distance_count - j, UINT32_C(4))) -
+                                1),
+              dxbc::Src::V2D(
+                  input_vertex_index,
+                  input_register_clip_and_cull_distances + (j >> 2)));
+        }
+        a.OpEmitStream(stream);
+      }
+      a.OpCutStream(stream);
+    } break;
+
+    default:
+      assert_unhandled_case(key.type);
+  }
+
+  a.OpRet();
+
+  // Write the actual number of temporary registers used.
+  shader_out[dcl_temps_count_position_dwords] = stat.temp_register_count;
+
+  // Write the shader program length in dwords.
+  shader_out[shex_position_dwords + 1] =
+      uint32_t(shader_out.size()) - shex_position_dwords;
+
+  {
+    auto& blob_header = *reinterpret_cast<dxbc::BlobHeader*>(
+        shader_out.data() + blob_position_dwords);
+    blob_header.fourcc = dxbc::BlobHeader::FourCC::kShaderEx;
+    blob_position_dwords = uint32_t(shader_out.size());
+    blob_header.size_bytes =
+        (blob_position_dwords - kBlobHeaderSizeDwords) * sizeof(uint32_t) -
+        shader_out[blob_offset_position_dwords++];
+  }
+
+  // ***************************************************************************
+  // Statistics
+  // ***************************************************************************
+
+  shader_out[blob_offset_position_dwords] =
+      uint32_t(blob_position_dwords * sizeof(uint32_t));
+  uint32_t stat_position_dwords = blob_position_dwords + kBlobHeaderSizeDwords;
+  shader_out.resize(stat_position_dwords +
+                    sizeof(dxbc::Statistics) / sizeof(uint32_t));
+  std::memcpy(shader_out.data() + stat_position_dwords, &stat,
+              sizeof(dxbc::Statistics));
+
+  {
+    auto& blob_header = *reinterpret_cast<dxbc::BlobHeader*>(
+        shader_out.data() + blob_position_dwords);
+    blob_header.fourcc = dxbc::BlobHeader::FourCC::kStatistics;
+    blob_position_dwords = uint32_t(shader_out.size());
+    blob_header.size_bytes =
+        (blob_position_dwords - kBlobHeaderSizeDwords) * sizeof(uint32_t) -
+        shader_out[blob_offset_position_dwords++];
+  }
+
+  // ***************************************************************************
+  // Container header
+  // ***************************************************************************
+
+  uint32_t shader_size_bytes = uint32_t(shader_out.size() * sizeof(uint32_t));
+  {
+    auto& container_header =
+        *reinterpret_cast<dxbc::ContainerHeader*>(shader_out.data());
+    container_header.InitializeIdentification();
+    container_header.size_bytes = shader_size_bytes;
+    container_header.blob_count = kBlobCount;
+    CalculateDXBCChecksum(
+        reinterpret_cast<unsigned char*>(shader_out.data()),
+        static_cast<unsigned int>(shader_size_bytes),
+        reinterpret_cast<unsigned int*>(&container_header.hash));
+  }
+}
+
+const std::vector<uint32_t>& PipelineCache::GetGeometryShader(
+    GeometryShaderKey key) {
+  auto it = geometry_shaders_.find(key);
+  if (it != geometry_shaders_.end()) {
+    return it->second;
+  }
+  std::vector<uint32_t> shader;
+  CreateDxbcGeometryShader(key, shader);
+  return geometry_shaders_.emplace(key, std::move(shader)).first->second;
 }
 
 ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
@@ -1801,7 +2845,103 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
       DxbcShaderTranslator::Modification(
           runtime_description.vertex_shader->modification())
           .vertex.host_vertex_shader_type;
-  if (host_vertex_shader_type == Shader::HostVertexShaderType::kVertex) {
+  if (Shader::IsHostVertexShaderTypeDomain(host_vertex_shader_type)) {
+    state_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+    xenos::TessellationMode tessellation_mode = xenos::TessellationMode(
+        description.primitive_topology_type_or_tessellation_mode);
+    if (tessellation_mode == xenos::TessellationMode::kAdaptive) {
+      state_desc.VS.pShaderBytecode = shaders::tessellation_adaptive_vs;
+      state_desc.VS.BytecodeLength = sizeof(shaders::tessellation_adaptive_vs);
+    } else {
+      state_desc.VS.pShaderBytecode = shaders::tessellation_indexed_vs;
+      state_desc.VS.BytecodeLength = sizeof(shaders::tessellation_indexed_vs);
+    }
+    switch (tessellation_mode) {
+      case xenos::TessellationMode::kDiscrete:
+        switch (host_vertex_shader_type) {
+          case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
+            state_desc.HS.pShaderBytecode = shaders::discrete_triangle_3cp_hs;
+            state_desc.HS.BytecodeLength =
+                sizeof(shaders::discrete_triangle_3cp_hs);
+            break;
+          case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
+            state_desc.HS.pShaderBytecode = shaders::discrete_triangle_1cp_hs;
+            state_desc.HS.BytecodeLength =
+                sizeof(shaders::discrete_triangle_1cp_hs);
+            break;
+          case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
+            state_desc.HS.pShaderBytecode = shaders::discrete_quad_4cp_hs;
+            state_desc.HS.BytecodeLength =
+                sizeof(shaders::discrete_quad_4cp_hs);
+            break;
+          case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
+            state_desc.HS.pShaderBytecode = shaders::discrete_quad_1cp_hs;
+            state_desc.HS.BytecodeLength =
+                sizeof(shaders::discrete_quad_1cp_hs);
+            break;
+          default:
+            assert_unhandled_case(host_vertex_shader_type);
+            return nullptr;
+        }
+        break;
+      case xenos::TessellationMode::kContinuous:
+        switch (host_vertex_shader_type) {
+          case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
+            state_desc.HS.pShaderBytecode = shaders::continuous_triangle_3cp_hs;
+            state_desc.HS.BytecodeLength =
+                sizeof(shaders::continuous_triangle_3cp_hs);
+            break;
+          case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
+            state_desc.HS.pShaderBytecode = shaders::continuous_triangle_1cp_hs;
+            state_desc.HS.BytecodeLength =
+                sizeof(shaders::continuous_triangle_1cp_hs);
+            break;
+          case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
+            state_desc.HS.pShaderBytecode = shaders::continuous_quad_4cp_hs;
+            state_desc.HS.BytecodeLength =
+                sizeof(shaders::continuous_quad_4cp_hs);
+            break;
+          case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
+            state_desc.HS.pShaderBytecode = shaders::continuous_quad_1cp_hs;
+            state_desc.HS.BytecodeLength =
+                sizeof(shaders::continuous_quad_1cp_hs);
+            break;
+          default:
+            assert_unhandled_case(host_vertex_shader_type);
+            return nullptr;
+        }
+        break;
+      case xenos::TessellationMode::kAdaptive:
+        switch (host_vertex_shader_type) {
+          case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
+            state_desc.HS.pShaderBytecode = shaders::adaptive_triangle_hs;
+            state_desc.HS.BytecodeLength =
+                sizeof(shaders::adaptive_triangle_hs);
+            break;
+          case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
+            state_desc.HS.pShaderBytecode = shaders::adaptive_quad_hs;
+            state_desc.HS.BytecodeLength = sizeof(shaders::adaptive_quad_hs);
+            break;
+          default:
+            assert_unhandled_case(host_vertex_shader_type);
+            return nullptr;
+        }
+        break;
+      default:
+        assert_unhandled_case(tessellation_mode);
+        return nullptr;
+    }
+    state_desc.DS.pShaderBytecode =
+        runtime_description.vertex_shader->translated_binary().data();
+    state_desc.DS.BytecodeLength =
+        runtime_description.vertex_shader->translated_binary().size();
+  } else {
+    assert_true(host_vertex_shader_type ==
+                Shader::HostVertexShaderType::kVertex);
+    if (host_vertex_shader_type != Shader::HostVertexShaderType::kVertex) {
+      // Fallback vertex shaders are not needed on Direct3D 12.
+      return nullptr;
+    }
     state_desc.VS.pShaderBytecode =
         runtime_description.vertex_shader->translated_binary().data();
     state_desc.VS.BytecodeLength =
@@ -1824,86 +2964,6 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
         assert_unhandled_case(primitive_topology_type);
         return nullptr;
     }
-    switch (description.geometry_shader) {
-      case PipelineGeometryShader::kPointList:
-        state_desc.GS.pShaderBytecode = primitive_point_list_gs;
-        state_desc.GS.BytecodeLength = sizeof(primitive_point_list_gs);
-        break;
-      case PipelineGeometryShader::kRectangleList:
-        state_desc.GS.pShaderBytecode = primitive_rectangle_list_gs;
-        state_desc.GS.BytecodeLength = sizeof(primitive_rectangle_list_gs);
-        break;
-      case PipelineGeometryShader::kQuadList:
-        state_desc.GS.pShaderBytecode = primitive_quad_list_gs;
-        state_desc.GS.BytecodeLength = sizeof(primitive_quad_list_gs);
-        break;
-      default:
-        break;
-    }
-  } else {
-    state_desc.VS.pShaderBytecode = tessellation_vs;
-    state_desc.VS.BytecodeLength = sizeof(tessellation_vs);
-    state_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
-    xenos::TessellationMode tessellation_mode = xenos::TessellationMode(
-        description.primitive_topology_type_or_tessellation_mode);
-    switch (tessellation_mode) {
-      case xenos::TessellationMode::kDiscrete:
-        switch (host_vertex_shader_type) {
-          case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
-          case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
-            state_desc.HS.pShaderBytecode = discrete_triangle_hs;
-            state_desc.HS.BytecodeLength = sizeof(discrete_triangle_hs);
-            break;
-          case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
-          case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
-            state_desc.HS.pShaderBytecode = discrete_quad_hs;
-            state_desc.HS.BytecodeLength = sizeof(discrete_quad_hs);
-            break;
-          default:
-            assert_unhandled_case(host_vertex_shader_type);
-            return nullptr;
-        }
-        break;
-      case xenos::TessellationMode::kContinuous:
-        switch (host_vertex_shader_type) {
-          case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
-          case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
-            state_desc.HS.pShaderBytecode = continuous_triangle_hs;
-            state_desc.HS.BytecodeLength = sizeof(continuous_triangle_hs);
-            break;
-          case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
-          case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
-            state_desc.HS.pShaderBytecode = continuous_quad_hs;
-            state_desc.HS.BytecodeLength = sizeof(continuous_quad_hs);
-            break;
-          default:
-            assert_unhandled_case(host_vertex_shader_type);
-            return nullptr;
-        }
-        break;
-      case xenos::TessellationMode::kAdaptive:
-        switch (host_vertex_shader_type) {
-          case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
-            state_desc.HS.pShaderBytecode = adaptive_triangle_hs;
-            state_desc.HS.BytecodeLength = sizeof(adaptive_triangle_hs);
-            break;
-          case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
-            state_desc.HS.pShaderBytecode = adaptive_quad_hs;
-            state_desc.HS.BytecodeLength = sizeof(adaptive_quad_hs);
-            break;
-          default:
-            assert_unhandled_case(host_vertex_shader_type);
-            return nullptr;
-        }
-        break;
-      default:
-        assert_unhandled_case(tessellation_mode);
-        return nullptr;
-    }
-    state_desc.DS.pShaderBytecode =
-        runtime_description.vertex_shader->translated_binary().data();
-    state_desc.DS.BytecodeLength =
-        runtime_description.vertex_shader->translated_binary().size();
   }
 
   // Pixel shader.
@@ -1922,22 +2982,26 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
     state_desc.PS.pShaderBytecode = depth_only_pixel_shader_.data();
     state_desc.PS.BytecodeLength = depth_only_pixel_shader_.size();
   } else {
-    if ((description.depth_func != xenos::CompareFunction::kAlways ||
+    if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
+        (description.depth_func != xenos::CompareFunction::kAlways ||
          description.depth_write) &&
         description.depth_format == xenos::DepthRenderTargetFormat::kD24FS8) {
-      switch (render_target_cache_.depth_float24_conversion()) {
-        case RenderTargetCache::DepthFloat24Conversion::kOnOutputTruncating:
-          state_desc.PS.pShaderBytecode = float24_truncate_ps;
-          state_desc.PS.BytecodeLength = sizeof(float24_truncate_ps);
-          break;
-        case RenderTargetCache::DepthFloat24Conversion::kOnOutputRounding:
-          state_desc.PS.pShaderBytecode = float24_round_ps;
-          state_desc.PS.BytecodeLength = sizeof(float24_round_ps);
-          break;
-        default:
-          break;
+      if (render_target_cache_.depth_float24_round()) {
+        state_desc.PS.pShaderBytecode = shaders::float24_round_ps;
+        state_desc.PS.BytecodeLength = sizeof(shaders::float24_round_ps);
+      } else {
+        state_desc.PS.pShaderBytecode = shaders::float24_truncate_ps;
+        state_desc.PS.BytecodeLength = sizeof(shaders::float24_truncate_ps);
       }
     }
+  }
+
+  // Geometry shader.
+  if (runtime_description.geometry_shader != nullptr) {
+    state_desc.GS.pShaderBytecode = runtime_description.geometry_shader->data();
+    state_desc.GS.BytecodeLength =
+        sizeof(*runtime_description.geometry_shader->data()) *
+        runtime_description.geometry_shader->size();
   }
 
   // Rasterizer state.
@@ -1962,9 +3026,14 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
       description.front_counter_clockwise ? TRUE : FALSE;
   state_desc.RasterizerState.DepthBias = description.depth_bias;
   state_desc.RasterizerState.DepthBiasClamp = 0.0f;
+  // With non-square resolution scaling, make sure the worst-case impact is
+  // reverted (slope only along the scaled axis), thus max. More bias is better
+  // than less bias, because less bias means Z fighting with the background is
+  // more likely.
   state_desc.RasterizerState.SlopeScaledDepthBias =
       description.depth_bias_slope_scaled *
-      float(render_target_cache_.GetResolutionScale());
+      float(std::max(render_target_cache_.draw_resolution_scale_x(),
+                     render_target_cache_.draw_resolution_scale_y()));
   state_desc.RasterizerState.DepthClipEnable =
       description.depth_clip ? TRUE : FALSE;
   uint32_t msaa_sample_count = uint32_t(1)
@@ -2066,10 +3135,11 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
         D3D12_BLEND_BLEND_FACTOR,  D3D12_BLEND_INV_BLEND_FACTOR,
         D3D12_BLEND_SRC_ALPHA_SAT,
     };
+    // 8 entries for safety since 3 bits from the guest are passed directly.
     static const D3D12_BLEND_OP kBlendOpMap[] = {
         D3D12_BLEND_OP_ADD, D3D12_BLEND_OP_SUBTRACT,     D3D12_BLEND_OP_MIN,
-        D3D12_BLEND_OP_MAX, D3D12_BLEND_OP_REV_SUBTRACT,
-    };
+        D3D12_BLEND_OP_MAX, D3D12_BLEND_OP_REV_SUBTRACT, D3D12_BLEND_OP_ADD,
+        D3D12_BLEND_OP_ADD, D3D12_BLEND_OP_ADD};
     for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
       const PipelineRenderTarget& rt = description.render_targets[i];
       if (!rt.used) {
@@ -2087,9 +3157,6 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
       }
       D3D12_RENDER_TARGET_BLEND_DESC& blend_desc =
           state_desc.BlendState.RenderTarget[i];
-      // Treat 1 * src + 0 * dest as disabled blending (there are opaque
-      // surfaces drawn with blending enabled, but it's 1 * src + 0 * dest, in
-      // Call of Duty 4 - GPU performance is better when not blending.
       if (rt.src_blend != PipelineBlendFactor::kOne ||
           rt.dest_blend != PipelineBlendFactor::kZero ||
           rt.blend_op != xenos::BlendOp::kAdd ||
@@ -2128,8 +3195,7 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
   }
 
   // Create the D3D12 pipeline state object.
-  auto device =
-      command_processor_.GetD3D12Context().GetD3D12Provider().GetDevice();
+  ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
   ID3D12PipelineState* state;
   if (FAILED(device->CreateGraphicsPipelineState(&state_desc,
                                                  IID_PPV_ARGS(&state)))) {

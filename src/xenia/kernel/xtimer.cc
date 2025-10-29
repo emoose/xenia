@@ -2,14 +2,14 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
 #include "xenia/kernel/xtimer.h"
 
-#include "xenia/base/clock.h"
+#include "xenia/base/chrono.h"
 #include "xenia/base/logging.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/kernel/xthread.h"
@@ -35,17 +35,29 @@ void XTimer::Initialize(uint32_t timer_type) {
       assert_always();
       break;
   }
+  assert_not_null(timer_);
 }
 
 X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms,
                           uint32_t routine, uint32_t routine_arg, bool resume) {
+  using xe::chrono::WinSystemClock;
+  using xe::chrono::XSystemClock;
   // Caller is checking for STATUS_TIMER_RESUME_IGNORED.
   if (resume) {
     return X_STATUS_TIMER_RESUME_IGNORED;
   }
 
-  due_time = Clock::ScaleGuestDurationFileTime(due_time);
   period_ms = Clock::ScaleGuestDurationMillis(period_ms);
+  WinSystemClock::time_point due_tp;
+  if (due_time < 0) {
+    // Any timer implementation uses absolute times eventually, convert as early
+    // as possible for increased accuracy
+    auto after = xe::chrono::hundrednanoseconds(-due_time);
+    due_tp = date::clock_cast<WinSystemClock>(XSystemClock::now() + after);
+  } else {
+    due_tp = date::clock_cast<WinSystemClock>(
+        XSystemClock::from_file_time(due_time));
+  }
 
   // Stash routine for callback.
   callback_thread_ = XThread::GetCurrentThread();
@@ -71,12 +83,10 @@ X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms,
 
   bool result;
   if (!period_ms) {
-    result = timer_->SetOnce(std::chrono::nanoseconds(due_time * 100),
-                             std::move(callback));
+    result = timer_->SetOnceAt(due_tp, std::move(callback));
   } else {
-    result = timer_->SetRepeating(std::chrono::nanoseconds(due_time * 100),
-                                  std::chrono::milliseconds(period_ms),
-                                  std::move(callback));
+    result = timer_->SetRepeatingAt(
+        due_tp, std::chrono::milliseconds(period_ms), std::move(callback));
   }
 
   return result ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;

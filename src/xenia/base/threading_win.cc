@@ -2,15 +2,20 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
 #include "xenia/base/assert.h"
+#include "xenia/base/chrono_steady_cast.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform_win.h"
 #include "xenia/base/threading.h"
+#include "xenia/base/threading_timer_queue.h"
+
+#define LOG_LASTERROR() \
+  { XELOGI("Win32 Error 0x{:08X} in " __FUNCTION__ "(...)", GetLastError()); }
 
 typedef HANDLE (*SetThreadDescriptionFn)(HANDLE hThread,
                                          PCWSTR lpThreadDescription);
@@ -63,7 +68,8 @@ static void set_name(HANDLE thread, const std::string_view name) {
     auto func =
         (SetThreadDescriptionFn)GetProcAddress(kernel, "SetThreadDescription");
     if (func) {
-      func(thread, reinterpret_cast<PCWSTR>(xe::to_utf16(name).c_str()));
+      auto u16name = xe::to_utf16(name);
+      func(thread, reinterpret_cast<PCWSTR>(u16name.c_str()));
     }
   }
   raise_thread_name_exception(thread, std::string(name));
@@ -108,48 +114,12 @@ bool SetTlsValue(TlsHandle handle, uintptr_t value) {
   return TlsSetValue(handle, reinterpret_cast<void*>(value)) ? true : false;
 }
 
-class Win32HighResolutionTimer : public HighResolutionTimer {
- public:
-  Win32HighResolutionTimer(std::function<void()> callback)
-      : callback_(callback) {}
-  ~Win32HighResolutionTimer() override {
-    if (handle_) {
-      DeleteTimerQueueTimer(nullptr, handle_, INVALID_HANDLE_VALUE);
-      handle_ = nullptr;
-    }
-  }
-
-  bool Initialize(std::chrono::milliseconds period) {
-    return CreateTimerQueueTimer(
-               &handle_, nullptr,
-               [](PVOID param, BOOLEAN timer_or_wait_fired) {
-                 auto timer =
-                     reinterpret_cast<Win32HighResolutionTimer*>(param);
-                 timer->callback_();
-               },
-               this, 0, DWORD(period.count()), WT_EXECUTEINTIMERTHREAD)
-               ? true
-               : false;
-  }
-
- private:
-  HANDLE handle_ = nullptr;
-  std::function<void()> callback_;
-};
-
-std::unique_ptr<HighResolutionTimer> HighResolutionTimer::CreateRepeating(
-    std::chrono::milliseconds period, std::function<void()> callback) {
-  auto timer = std::make_unique<Win32HighResolutionTimer>(std::move(callback));
-  if (!timer->Initialize(period)) {
-    return nullptr;
-  }
-  return std::unique_ptr<HighResolutionTimer>(timer.release());
-}
-
 template <typename T>
 class Win32Handle : public T {
  public:
-  explicit Win32Handle(HANDLE handle) : handle_(handle) {}
+  explicit Win32Handle(HANDLE handle) : handle_(handle) {
+    assert_not_null(handle);
+  }
   ~Win32Handle() override {
     CloseHandle(handle_);
     handle_ = nullptr;
@@ -244,13 +214,25 @@ class Win32Event : public Win32Handle<Event> {
 };
 
 std::unique_ptr<Event> Event::CreateManualResetEvent(bool initial_state) {
-  return std::make_unique<Win32Event>(
-      CreateEvent(nullptr, TRUE, initial_state ? TRUE : FALSE, nullptr));
+  HANDLE handle =
+      CreateEvent(nullptr, TRUE, initial_state ? TRUE : FALSE, nullptr);
+  if (handle) {
+    return std::make_unique<Win32Event>(handle);
+  } else {
+    LOG_LASTERROR();
+    return nullptr;
+  }
 }
 
 std::unique_ptr<Event> Event::CreateAutoResetEvent(bool initial_state) {
-  return std::make_unique<Win32Event>(
-      CreateEvent(nullptr, FALSE, initial_state ? TRUE : FALSE, nullptr));
+  HANDLE handle =
+      CreateEvent(nullptr, FALSE, initial_state ? TRUE : FALSE, nullptr);
+  if (handle) {
+    return std::make_unique<Win32Event>(handle);
+  } else {
+    LOG_LASTERROR();
+    return nullptr;
+  }
 }
 
 class Win32Semaphore : public Win32Handle<Semaphore> {
@@ -267,8 +249,14 @@ class Win32Semaphore : public Win32Handle<Semaphore> {
 
 std::unique_ptr<Semaphore> Semaphore::Create(int initial_count,
                                              int maximum_count) {
-  return std::make_unique<Win32Semaphore>(
-      CreateSemaphore(nullptr, initial_count, maximum_count, nullptr));
+  HANDLE handle =
+      CreateSemaphore(nullptr, initial_count, maximum_count, nullptr);
+  if (handle) {
+    return std::make_unique<Win32Semaphore>(handle);
+  } else {
+    LOG_LASTERROR();
+    return nullptr;
+  }
 }
 
 class Win32Mutant : public Win32Handle<Mutant> {
@@ -279,20 +267,38 @@ class Win32Mutant : public Win32Handle<Mutant> {
 };
 
 std::unique_ptr<Mutant> Mutant::Create(bool initial_owner) {
-  return std::make_unique<Win32Mutant>(
-      CreateMutex(nullptr, initial_owner ? TRUE : FALSE, nullptr));
+  HANDLE handle = CreateMutex(nullptr, initial_owner ? TRUE : FALSE, nullptr);
+  if (handle) {
+    return std::make_unique<Win32Mutant>(handle);
+  } else {
+    LOG_LASTERROR();
+    return nullptr;
+  }
 }
 
 class Win32Timer : public Win32Handle<Timer> {
+  using WClock_ = Timer::WClock_;
+  using GClock_ = Timer::GClock_;
+
  public:
   explicit Win32Timer(HANDLE handle) : Win32Handle(handle) {}
   ~Win32Timer() = default;
-  bool SetOnce(std::chrono::nanoseconds due_time,
-               std::function<void()> opt_callback) override {
+
+  bool SetOnceAfter(xe::chrono::hundrednanoseconds rel_time,
+                    std::function<void()> opt_callback) override {
+    return SetOnceAt(WClock_::now() + rel_time, std::move(opt_callback));
+  }
+  bool SetOnceAt(GClock_::time_point due_time,
+                 std::function<void()> opt_callback) override {
+    return SetOnceAt(date::clock_cast<WClock_>(due_time),
+                     std::move(opt_callback));
+  }
+  bool SetOnceAt(WClock_::time_point due_time,
+                 std::function<void()> opt_callback) override {
     std::lock_guard<std::mutex> lock(mutex_);
     callback_ = std::move(opt_callback);
     LARGE_INTEGER due_time_li;
-    due_time_li.QuadPart = due_time.count() / 100;
+    due_time_li.QuadPart = WClock_::to_file_time(due_time);
     auto completion_routine =
         callback_ ? reinterpret_cast<PTIMERAPCROUTINE>(CompletionRoutine)
                   : NULL;
@@ -301,13 +307,26 @@ class Win32Timer : public Win32Handle<Timer> {
                ? true
                : false;
   }
-  bool SetRepeating(std::chrono::nanoseconds due_time,
-                    std::chrono::milliseconds period,
-                    std::function<void()> opt_callback) override {
+
+  bool SetRepeatingAfter(
+      xe::chrono::hundrednanoseconds rel_time, std::chrono::milliseconds period,
+      std::function<void()> opt_callback = nullptr) override {
+    return SetRepeatingAt(WClock_::now() + rel_time, period,
+                          std::move(opt_callback));
+  }
+  bool SetRepeatingAt(GClock_::time_point due_time,
+                      std::chrono::milliseconds period,
+                      std::function<void()> opt_callback = nullptr) {
+    return SetRepeatingAt(date::clock_cast<WClock_>(due_time), period,
+                          std::move(opt_callback));
+  }
+  bool SetRepeatingAt(WClock_::time_point due_time,
+                      std::chrono::milliseconds period,
+                      std::function<void()> opt_callback) override {
     std::lock_guard<std::mutex> lock(mutex_);
     callback_ = std::move(opt_callback);
     LARGE_INTEGER due_time_li;
-    due_time_li.QuadPart = due_time.count() / 100;
+    due_time_li.QuadPart = WClock_::to_file_time(due_time);
     auto completion_routine =
         callback_ ? reinterpret_cast<PTIMERAPCROUTINE>(CompletionRoutine)
                   : NULL;
@@ -316,6 +335,7 @@ class Win32Timer : public Win32Handle<Timer> {
                ? true
                : false;
   }
+
   bool Cancel() override {
     // Reset the callback immediately so that any completions don't call it.
     std::lock_guard<std::mutex> lock(mutex_);
@@ -340,11 +360,23 @@ class Win32Timer : public Win32Handle<Timer> {
 };
 
 std::unique_ptr<Timer> Timer::CreateManualResetTimer() {
-  return std::make_unique<Win32Timer>(CreateWaitableTimer(NULL, TRUE, NULL));
+  HANDLE handle = CreateWaitableTimer(NULL, TRUE, NULL);
+  if (handle) {
+    return std::make_unique<Win32Timer>(handle);
+  } else {
+    LOG_LASTERROR();
+    return nullptr;
+  }
 }
 
 std::unique_ptr<Timer> Timer::CreateSynchronizationTimer() {
-  return std::make_unique<Win32Timer>(CreateWaitableTimer(NULL, FALSE, NULL));
+  HANDLE handle = CreateWaitableTimer(NULL, FALSE, NULL);
+  if (handle) {
+    return std::make_unique<Win32Timer>(handle);
+  } else {
+    LOG_LASTERROR();
+    return nullptr;
+  }
 }
 
 class Win32Thread : public Win32Handle<Thread> {
@@ -446,15 +478,13 @@ std::unique_ptr<Thread> Thread::Create(CreationParameters params,
   HANDLE handle =
       CreateThread(NULL, params.stack_size, ThreadStartRoutine, start_data,
                    params.create_suspended ? CREATE_SUSPENDED : 0, NULL);
-  if (handle == INVALID_HANDLE_VALUE) {
-    // TODO(benvanik): pass back?
-    auto last_error = GetLastError();
-    XELOGE("Unable to CreateThread: {}", last_error);
+  if (handle) {
+    return std::make_unique<Win32Thread>(handle);
+  } else {
+    LOG_LASTERROR();
     delete start_data;
     return nullptr;
   }
-
-  return std::make_unique<Win32Thread>(handle);
 }
 
 Thread* Thread::GetCurrentThread() {

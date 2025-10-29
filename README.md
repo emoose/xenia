@@ -21,10 +21,10 @@ Discussing illegal activities will get you banned.
 
 ## Status
 
-Buildbot | Status
--------- | ------
-[Windows](https://ci.appveyor.com/project/benvanik/xenia/branch/master) | [![Build status](https://ci.appveyor.com/api/projects/status/ftqiy86kdfawyx3a/branch/master?svg=true)](https://ci.appveyor.com/project/benvanik/xenia/branch/master)
-[Linux](https://travis-ci.org/xenia-project/xenia) | [![Build status](https://travis-ci.org/xenia-project/xenia.svg?branch=master)](https://travis-ci.org/xenia-project/xenia)
+Buildbot | Status | Releases
+-------- | ------ | --------
+[Windows](https://ci.appveyor.com/project/epozzobon/xenia/branch/stfs-writer) | [![Build status](https://ci.appveyor.com/api/projects/status/l67qt25j0v0tgt7x?svg=true)](https://ci.appveyor.com/project/epozzobon/xenia/branch/stfs-writer) | [Latest](https://github.com/epozzobon/xenia/releases/latest) ◦ [All](https://github.com/epozzobon/xenia/releases)
+[Linux](https://cloud.drone.io/epozzobon/xenia) | [![Build status](https://cloud.drone.io/api/badges/epozzobon/xenia/status.svg)](https://cloud.drone.io/epozzobon/xenia)
 
 Quite a few real games run. Quite a few don't.
 See the [Game compatibility list](https://github.com/xenia-project/game-compatibility/issues)
@@ -61,7 +61,7 @@ Fixes and optimizations are always welcome (please!), but in addition to
 that there are some major work areas still untouched:
 
 * Help work through [missing functionality/bugs in games](https://github.com/xenia-project/xenia/labels/compat)
-* Add input drivers for [third-party controllers](https://github.com/xenia-project/xenia/issues/1333)
+* Reduce the size of Xenia's [huge log files](https://github.com/xenia-project/xenia/issues/1526)
 * Skilled with Linux? A strong contributor is needed to [help with porting](https://github.com/xenia-project/xenia/labels/platform-linux)
 
 See more projects [good for contributors](https://github.com/xenia-project/xenia/labels/good%20first%20issue). It's a good idea to ask on Discord and check the issues page before beginning work on

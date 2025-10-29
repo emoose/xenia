@@ -16,6 +16,7 @@ namespace config {
 void SetupConfig(const std::filesystem::path& config_folder);
 void LoadGameConfig(const std::string_view title_id);
 std::filesystem::path GetConfigFolder();
+void SaveConfig();
 }  // namespace config
 
 #endif  // XENIA_CONFIG_H_

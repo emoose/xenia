@@ -42,6 +42,8 @@ class Processor;
 namespace xe {
 namespace kernel {
 
+constexpr fourcc_t kKernelSaveSignature = make_fourcc("KRNL");
+
 class Dispatcher;
 class XHostThread;
 class KernelModule;
@@ -107,6 +109,8 @@ class KernelState {
   }
 
   util::XdbfBlock title_icon() const { return title_spa_data_.icon(); }
+  util::XdbfGameData title_xdbf() const;
+  util::XdbfGameData module_xdbf(object_ref<UserModule> exec_module) const;
 
   xam::AppManager* app_manager() const { return app_manager_.get(); }
   xam::ContentManager* content_manager() const {

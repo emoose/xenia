@@ -15,7 +15,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/cpu/backend/backend.h"
 
-DECLARE_bool(use_haswell_instructions);
+DECLARE_int32(x64_extension_mask);
 
 namespace xe {
 class Exception;
@@ -26,8 +26,6 @@ namespace backend {
 namespace x64 {
 
 class X64CodeCache;
-
-#define XENIA_HAS_X64_BACKEND 1
 
 typedef void* (*HostToGuestThunk)(void* target, void* arg0, void* arg1);
 typedef void* (*GuestToHostThunk)(void* target, void* arg0, void* arg1);

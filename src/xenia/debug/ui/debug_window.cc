@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -32,6 +32,9 @@
 #include "xenia/kernel/xthread.h"
 #include "xenia/ui/graphics_provider.h"
 #include "xenia/ui/imgui_drawer.h"
+#include "xenia/ui/immediate_drawer.h"
+#include "xenia/ui/presenter.h"
+#include "xenia/ui/windowed_app_context.h"
 
 DEFINE_bool(imgui_debug, false, "Show ImGui debugging tools.", "UI");
 
@@ -48,13 +51,18 @@ using xe::ui::MenuItem;
 using xe::ui::MouseEvent;
 using xe::ui::UIEvent;
 
-const std::string kBaseTitle = "Xenia Debugger";
+void DebugWindow::DebugDialog::OnDraw(ImGuiIO& io) {
+  debug_window_.DrawFrame(io);
+}
 
-DebugWindow::DebugWindow(Emulator* emulator, xe::ui::Loop* loop)
+static const std::string kBaseTitle = "Xenia Debugger";
+
+DebugWindow::DebugWindow(Emulator* emulator,
+                         xe::ui::WindowedAppContext& app_context)
     : emulator_(emulator),
       processor_(emulator->processor()),
-      loop_(loop),
-      window_(xe::ui::Window::Create(loop_, kBaseTitle)) {
+      app_context_(app_context),
+      window_(xe::ui::Window::Create(app_context_, kBaseTitle, 1500, 1000)) {
   if (cs_open(CS_ARCH_X86, CS_MODE_64, &capstone_handle_) != CS_ERR_OK) {
     assert_always("Failed to initialize capstone");
   }
@@ -63,16 +71,18 @@ DebugWindow::DebugWindow(Emulator* emulator, xe::ui::Loop* loop)
 }
 
 DebugWindow::~DebugWindow() {
-  loop_->PostSynchronous([this]() { window_.reset(); });
+  // Make sure pending functions referencing the DebugWindow are executed.
+  app_context_.ExecutePendingFunctionsFromUIThread();
 
   if (capstone_handle_) {
     cs_close(&capstone_handle_);
   }
 }
 
-std::unique_ptr<DebugWindow> DebugWindow::Create(Emulator* emulator,
-                                                 xe::ui::Loop* loop) {
-  std::unique_ptr<DebugWindow> debug_window(new DebugWindow(emulator, loop));
+std::unique_ptr<DebugWindow> DebugWindow::Create(
+    Emulator* emulator, xe::ui::WindowedAppContext& app_context) {
+  std::unique_ptr<DebugWindow> debug_window(
+      new DebugWindow(emulator, app_context));
   if (!debug_window->Initialize()) {
     xe::FatalError("Failed to initialize debug window");
     return nullptr;
@@ -82,46 +92,57 @@ std::unique_ptr<DebugWindow> DebugWindow::Create(Emulator* emulator,
 }
 
 bool DebugWindow::Initialize() {
-  if (!window_->Initialize()) {
-    XELOGE("Failed to initialize platform window");
-    return false;
-  }
-
-  loop_->on_quit.AddListener([this](UIEvent* e) { window_.reset(); });
-
   // Main menu.
   auto main_menu = MenuItem::Create(MenuItem::Type::kNormal);
   auto file_menu = MenuItem::Create(MenuItem::Type::kPopup, "&File");
   {
-    file_menu->AddChild(MenuItem::Create(MenuItem::Type::kString, "&Close",
-                                         "Alt+F4",
-                                         [this]() { window_->Close(); }));
+    file_menu->AddChild(
+        MenuItem::Create(MenuItem::Type::kString, "&Close", "Alt+F4",
+                         [this]() { window_->RequestClose(); }));
   }
   main_menu->AddChild(std::move(file_menu));
-  window_->set_main_menu(std::move(main_menu));
+  window_->SetMainMenu(std::move(main_menu));
 
-  window_->Resize(1500, 1000);
+  // Open the window once it's configured.
+  if (!window_->Open()) {
+    XELOGE("Failed to open the platform window for the debugger");
+    return false;
+  }
 
-  // Create the graphics context used for drawing.
-  auto provider = emulator_->display_window()->context()->provider();
-  window_->set_context(provider->CreateContext(window_.get()));
+  // Setup drawing to the window.
 
-  // Enable imgui input.
-  window_->set_imgui_input_enabled(true);
+  xe::ui::GraphicsProvider& graphics_provider =
+      *emulator_->graphics_system()->provider();
 
-  window_->on_painting.AddListener([this](UIEvent* e) { DrawFrame(); });
+  presenter_ = graphics_provider.CreatePresenter();
+  if (!presenter_) {
+    XELOGE("Failed to initialize the presenter for the debugger");
+    return false;
+  }
 
+  immediate_drawer_ = graphics_provider.CreateImmediateDrawer();
+  if (!immediate_drawer_) {
+    XELOGE("Failed to initialize the immediate drawer for the debugger");
+    return false;
+  }
+  immediate_drawer_->SetPresenter(presenter_.get());
+
+  imgui_drawer_ = std::make_unique<xe::ui::ImGuiDrawer>(window_.get(), 0);
+  imgui_drawer_->SetPresenterAndImmediateDrawer(presenter_.get(),
+                                                immediate_drawer_.get());
+  debug_dialog_ =
+      std::unique_ptr<DebugDialog>(new DebugDialog(imgui_drawer_.get(), *this));
+
+  // Update the cache before the first frame.
   UpdateCache();
-  window_->Invalidate();
+
+  // Begin drawing.
+  window_->SetPresenter(presenter_.get());
 
   return true;
 }
 
-void DebugWindow::DrawFrame() {
-  xe::ui::GraphicsContextLock lock(window_->context());
-
-  auto& io = window_->imgui_drawer()->GetIO();
-
+void DebugWindow::DrawFrame(ImGuiIO& io) {
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(-1, 0));
   ImGui::Begin("main_window", nullptr,
                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
@@ -161,7 +182,7 @@ void DebugWindow::DrawFrame() {
                          ImVec2(kSplitterWidth, top_panes_height));
   if (ImGui::IsItemActive()) {
     function_pane_width += io.MouseDelta.x;
-    function_pane_width = xe::clamp(function_pane_width, 30.0f, FLT_MAX);
+    function_pane_width = xe::clamp_float(function_pane_width, 30.0f, FLT_MAX);
   }
   ImGui::SameLine();
   ImGui::BeginChild("##source_pane",
@@ -173,7 +194,7 @@ void DebugWindow::DrawFrame() {
                          ImVec2(kSplitterWidth, top_panes_height));
   if (ImGui::IsItemActive()) {
     source_pane_width += io.MouseDelta.x;
-    source_pane_width = xe::clamp(source_pane_width, 30.0f, FLT_MAX);
+    source_pane_width = xe::clamp_float(source_pane_width, 30.0f, FLT_MAX);
   }
   ImGui::SameLine();
   ImGui::BeginChild("##registers_pane",
@@ -185,7 +206,8 @@ void DebugWindow::DrawFrame() {
                          ImVec2(kSplitterWidth, top_panes_height));
   if (ImGui::IsItemActive()) {
     registers_pane_width += io.MouseDelta.x;
-    registers_pane_width = xe::clamp(registers_pane_width, 30.0f, FLT_MAX);
+    registers_pane_width =
+        xe::clamp_float(registers_pane_width, 30.0f, FLT_MAX);
   }
   ImGui::SameLine();
   ImGui::BeginChild("##right_pane", ImVec2(0, top_panes_height), true);
@@ -213,7 +235,7 @@ void DebugWindow::DrawFrame() {
   ImGui::InvisibleButton("##hsplitter0", ImVec2(-1, kSplitterWidth));
   if (ImGui::IsItemActive()) {
     bottom_panes_height -= io.MouseDelta.y;
-    bottom_panes_height = xe::clamp(bottom_panes_height, 30.0f, FLT_MAX);
+    bottom_panes_height = xe::clamp_float(bottom_panes_height, 30.0f, FLT_MAX);
   }
   ImGui::BeginChild("##log_pane", ImVec2(log_pane_width, bottom_panes_height),
                     true);
@@ -224,7 +246,8 @@ void DebugWindow::DrawFrame() {
                          ImVec2(kSplitterWidth, bottom_panes_height));
   if (ImGui::IsItemActive()) {
     breakpoints_pane_width -= io.MouseDelta.x;
-    breakpoints_pane_width = xe::clamp(breakpoints_pane_width, 30.0f, FLT_MAX);
+    breakpoints_pane_width =
+        xe::clamp_float(breakpoints_pane_width, 30.0f, FLT_MAX);
   }
   ImGui::SameLine();
   ImGui::BeginChild("##breakpoints_pane", ImVec2(0, 0), true);
@@ -240,9 +263,6 @@ void DebugWindow::DrawFrame() {
     ImGui::ShowDemoWindow();
     ImGui::ShowMetricsWindow();
   }
-
-  // Continuous paint.
-  window_->Invalidate();
 }
 
 void DebugWindow::DrawToolbar() {
@@ -350,7 +370,7 @@ void DebugWindow::DrawSourcePane() {
   ImGui::PushButtonRepeat(true);
   bool can_step = !cache_.is_running && state_.thread_info;
   if (ImGui::ButtonEx("Step PPC", ImVec2(0, 0),
-                      can_step ? 0 : ImGuiButtonFlags_Disabled)) {
+                      can_step ? 0 : ImGuiItemFlags_Disabled)) {
     // By enabling the button when stepping we allow repeat behavior.
     if (processor_->execution_state() != cpu::ExecutionState::kStepping) {
       processor_->StepGuestInstruction(state_.thread_info->thread_id);
@@ -368,7 +388,7 @@ void DebugWindow::DrawSourcePane() {
     ImGui::SameLine();
     ImGui::PushButtonRepeat(true);
     if (ImGui::ButtonEx("Step x64", ImVec2(0, 0),
-                        can_step ? 0 : ImGuiButtonFlags_Disabled)) {
+                        can_step ? 0 : ImGuiItemFlags_Disabled)) {
       // By enabling the button when stepping we allow repeat behavior.
       if (processor_->execution_state() != cpu::ExecutionState::kStepping) {
         processor_->StepHostInstruction(state_.thread_info->thread_id);
@@ -942,7 +962,7 @@ void DebugWindow::DrawRegistersPane() {
         auto reg = static_cast<X64Register>(i);
         ImGui::BeginGroup();
         ImGui::AlignTextToFramePadding();
-        ImGui::Text("%3s", X64Context::GetRegisterName(reg));
+        ImGui::Text("%3s", HostThreadContext::GetRegisterName(reg));
         ImGui::SameLine();
         ImGui::Dummy(ImVec2(4, 0));
         ImGui::SameLine();
@@ -967,7 +987,7 @@ void DebugWindow::DrawRegistersPane() {
             static_cast<X64Register>(static_cast<int>(X64Register::kXmm0) + i);
         ImGui::BeginGroup();
         ImGui::AlignTextToFramePadding();
-        ImGui::Text("%5s", X64Context::GetRegisterName(reg));
+        ImGui::Text("%5s", HostThreadContext::GetRegisterName(reg));
         ImGui::SameLine();
         ImGui::Dummy(ImVec2(4, 0));
         ImGui::SameLine();
@@ -1425,7 +1445,7 @@ void DebugWindow::UpdateCache() {
   auto kernel_state = emulator_->kernel_state();
   auto object_table = kernel_state->object_table();
 
-  loop_->Post([this]() {
+  app_context_.CallInUIThread([this]() {
     std::string title = kBaseTitle;
     switch (processor_->execution_state()) {
       case cpu::ExecutionState::kEnded:
@@ -1441,7 +1461,7 @@ void DebugWindow::UpdateCache() {
         title += " (stepping)";
         break;
     }
-    window_->set_title(title);
+    window_->SetTitle(title);
   });
 
   cache_.is_running =
@@ -1531,9 +1551,7 @@ Breakpoint* DebugWindow::LookupBreakpointAtAddress(
   }
 }
 
-void DebugWindow::OnFocus() {
-  loop_->Post([this]() { window_->set_focus(true); });
-}
+void DebugWindow::OnFocus() { Focus(); }
 
 void DebugWindow::OnDetached() {
   UpdateCache();
@@ -1546,30 +1564,34 @@ void DebugWindow::OnDetached() {
 
 void DebugWindow::OnExecutionPaused() {
   UpdateCache();
-  loop_->Post([this]() { window_->set_focus(true); });
+  Focus();
 }
 
 void DebugWindow::OnExecutionContinued() {
   UpdateCache();
-  loop_->Post([this]() { window_->set_focus(true); });
+  Focus();
 }
 
 void DebugWindow::OnExecutionEnded() {
   UpdateCache();
-  loop_->Post([this]() { window_->set_focus(true); });
+  Focus();
 }
 
 void DebugWindow::OnStepCompleted(cpu::ThreadDebugInfo* thread_info) {
   UpdateCache();
   SelectThreadStackFrame(thread_info, 0, true);
-  loop_->Post([this]() { window_->set_focus(true); });
+  Focus();
 }
 
 void DebugWindow::OnBreakpointHit(Breakpoint* breakpoint,
                                   cpu::ThreadDebugInfo* thread_info) {
   UpdateCache();
   SelectThreadStackFrame(thread_info, 0, true);
-  loop_->Post([this]() { window_->set_focus(true); });
+  Focus();
+}
+
+void DebugWindow::Focus() const {
+  app_context_.CallInUIThread([this]() { window_->Focus(); });
 }
 
 }  // namespace ui

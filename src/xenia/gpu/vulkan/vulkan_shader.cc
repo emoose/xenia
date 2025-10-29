@@ -2,74 +2,71 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
 #include "xenia/gpu/vulkan/vulkan_shader.h"
 
-#include "third_party/fmt/include/fmt/format.h"
+#include <cstdint>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
-#include "xenia/base/math.h"
-#include "xenia/ui/vulkan/vulkan_device.h"
-#include "xenia/ui/vulkan/vulkan_util.h"
+#include "xenia/ui/vulkan/vulkan_provider.h"
 
 namespace xe {
 namespace gpu {
 namespace vulkan {
 
-using xe::ui::vulkan::CheckResult;
-
-VulkanShader::VulkanShader(ui::vulkan::VulkanDevice* device,
-                           xenos::ShaderType shader_type, uint64_t data_hash,
-                           const uint32_t* dword_ptr, uint32_t dword_count)
-    : Shader(shader_type, data_hash, dword_ptr, dword_count), device_(device) {}
-
 VulkanShader::VulkanTranslation::~VulkanTranslation() {
   if (shader_module_) {
-    const VulkanShader& vulkan_shader = static_cast<VulkanShader&>(shader());
-    vkDestroyShaderModule(*vulkan_shader.device_, shader_module_, nullptr);
-    shader_module_ = nullptr;
+    const ui::vulkan::VulkanDevice* const vulkan_device =
+        static_cast<const VulkanShader&>(shader()).vulkan_device_;
+    vulkan_device->functions().vkDestroyShaderModule(vulkan_device->device(),
+                                                     shader_module_, nullptr);
   }
 }
 
-bool VulkanShader::VulkanTranslation::Prepare() {
-  assert_null(shader_module_);
-  assert_true(is_valid());
-
-  const VulkanShader& vulkan_shader = static_cast<VulkanShader&>(shader());
-  ui::vulkan::VulkanDevice* device = vulkan_shader.device_;
-
-  // Create the shader module.
-  VkShaderModuleCreateInfo shader_info;
-  shader_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-  shader_info.pNext = nullptr;
-  shader_info.flags = 0;
-  shader_info.codeSize = translated_binary().size();
-  shader_info.pCode =
-      reinterpret_cast<const uint32_t*>(translated_binary().data());
-  auto status =
-      vkCreateShaderModule(*device, &shader_info, nullptr, &shader_module_);
-  CheckResult(status, "vkCreateShaderModule");
-
-  char type_char;
-  switch (vulkan_shader.type()) {
-    case xenos::ShaderType::kVertex:
-      type_char = 'v';
-      break;
-    case xenos::ShaderType::kPixel:
-      type_char = 'p';
-      break;
-    default:
-      type_char = 'u';
+VkShaderModule VulkanShader::VulkanTranslation::GetOrCreateShaderModule() {
+  if (!is_valid()) {
+    return VK_NULL_HANDLE;
   }
-  device->DbgSetObjectName(uint64_t(shader_module_),
-                           VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT,
-                           fmt::format("S({}): {:016X}", type_char,
-                                       vulkan_shader.ucode_data_hash()));
-  return status == VK_SUCCESS;
+  if (shader_module_ != VK_NULL_HANDLE) {
+    return shader_module_;
+  }
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      static_cast<const VulkanShader&>(shader()).vulkan_device_;
+  VkShaderModuleCreateInfo shader_module_create_info;
+  shader_module_create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  shader_module_create_info.pNext = nullptr;
+  shader_module_create_info.flags = 0;
+  shader_module_create_info.codeSize = translated_binary().size();
+  shader_module_create_info.pCode =
+      reinterpret_cast<const uint32_t*>(translated_binary().data());
+  if (vulkan_device->functions().vkCreateShaderModule(
+          vulkan_device->device(), &shader_module_create_info, nullptr,
+          &shader_module_) != VK_SUCCESS) {
+    XELOGE(
+        "VulkanShader::VulkanTranslation: Failed to create a Vulkan shader "
+        "module for shader {:016X} modification {:016X}",
+        shader().ucode_data_hash(), modification());
+    MakeInvalid();
+    return VK_NULL_HANDLE;
+  }
+  return shader_module_;
+}
+
+VulkanShader::VulkanShader(const ui::vulkan::VulkanDevice* const vulkan_device,
+                           const xenos::ShaderType shader_type,
+                           const uint64_t ucode_data_hash,
+                           const uint32_t* const ucode_dwords,
+                           const size_t ucode_dword_count,
+                           const std::endian ucode_source_endian)
+    : SpirvShader(shader_type, ucode_data_hash, ucode_dwords, ucode_dword_count,
+                  ucode_source_endian),
+      vulkan_device_(vulkan_device) {
+  assert_not_null(vulkan_device);
 }
 
 Shader::Translation* VulkanShader::CreateTranslationInstance(

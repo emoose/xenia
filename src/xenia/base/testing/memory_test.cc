@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2015 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -14,11 +14,13 @@
 
 #include "xenia/base/clock.h"
 
+#include <array>
+
 namespace xe {
 namespace base {
 namespace test {
 
-TEST_CASE("copy_128_aligned", "Copy and Swap") {
+TEST_CASE("copy_128_aligned", "[copy_and_swap]") {
   alignas(128) uint8_t src[256], dest[256];
   for (uint8_t i = 0; i < 255; ++i) {
     src[i] = 255 - i;
@@ -37,7 +39,7 @@ TEST_CASE("copy_128_aligned", "Copy and Swap") {
   REQUIRE(std::memcmp(dest, src + 1, 128));
 }
 
-TEST_CASE("copy_and_swap_16_aligned", "Copy and Swap") {
+TEST_CASE("copy_and_swap_16_aligned", "[copy_and_swap]") {
   alignas(16) uint16_t a = 0x1111, b = 0xABCD;
   copy_and_swap_16_aligned(&a, &b, 1);
   REQUIRE(a == 0xCDAB);
@@ -93,7 +95,7 @@ TEST_CASE("copy_and_swap_16_aligned", "Copy and Swap") {
   REQUIRE(std::strcmp(f, "s atdnra dlagimnne.t") == 0);
 }
 
-TEST_CASE("copy_and_swap_16_unaligned", "Copy and Swap") {
+TEST_CASE("copy_and_swap_16_unaligned", "[copy_and_swap]") {
   uint16_t a = 0x1111, b = 0xABCD;
   copy_and_swap_16_unaligned(&a, &b, 1);
   REQUIRE(a == 0xCDAB);
@@ -112,6 +114,24 @@ TEST_CASE("copy_and_swap_16_unaligned", "Copy and Swap") {
   REQUIRE(c[1] == 0x6745);
   REQUIRE(c[2] == 0xAB89);
   REQUIRE(c[3] == 0xEFCD);
+
+  {
+    constexpr size_t count = 100;
+    std::array<uint8_t, count * 2> src{};
+    std::array<uint8_t, count * 2> dst{};
+    for (size_t i = 0; i < src.size(); ++i) {
+      src[i] = static_cast<uint8_t>(i) + 1;  // no zero in array
+    }
+    copy_and_swap_16_unaligned(dst.data(), src.data(), count);
+    for (size_t i = 0; i < src.size(); i += 2) {
+      // Check src is untouched
+      REQUIRE(static_cast<size_t>(src[i + 0]) == i + 1);
+      REQUIRE(static_cast<size_t>(src[i + 1]) == i + 2);
+      // Check swapped bytes
+      REQUIRE(static_cast<size_t>(dst[i]) == static_cast<size_t>(src[i + 1]));
+      REQUIRE(static_cast<size_t>(dst[i + 1]) == static_cast<size_t>(src[i]));
+    }
+  }
 
   uint64_t e;
   copy_and_swap_16_unaligned(&e, d, 4);
@@ -139,7 +159,7 @@ TEST_CASE("copy_and_swap_16_unaligned", "Copy and Swap") {
                       "noeg rhtnas atdnra dlagimnne.t") == 0);
 }
 
-TEST_CASE("copy_and_swap_32_aligned", "Copy and Swap") {
+TEST_CASE("copy_and_swap_32_aligned", "[copy_and_swap]") {
   alignas(32) uint32_t a = 0x11111111, b = 0x89ABCDEF;
   copy_and_swap_32_aligned(&a, &b, 1);
   REQUIRE(a == 0xEFCDAB89);
@@ -195,7 +215,7 @@ TEST_CASE("copy_and_swap_32_aligned", "Copy and Swap") {
   REQUIRE(std::strcmp(f, "ats radnla dmngi.tne") == 0);
 }
 
-TEST_CASE("copy_and_swap_32_unaligned", "Copy and Swap") {
+TEST_CASE("copy_and_swap_32_unaligned", "[copy_and_swap]") {
   uint32_t a = 0x11111111, b = 0x89ABCDEF;
   copy_and_swap_32_unaligned(&a, &b, 1);
   REQUIRE(a == 0xEFCDAB89);
@@ -220,6 +240,32 @@ TEST_CASE("copy_and_swap_32_unaligned", "Copy and Swap") {
   REQUIRE(c[1] == 0xEFCDAB89);
   REQUIRE(c[2] == 0xEDEE87E8);
   REQUIRE(c[3] == 0x994151D8);
+
+  {
+    constexpr size_t count = 17;
+    std::array<uint8_t, count * 4> src{};
+    std::array<uint8_t, count * 4> dst{};
+    for (size_t i = 0; i < src.size(); ++i) {
+      src[i] = static_cast<uint8_t>(i) + 1;  // no zero in array
+    }
+    copy_and_swap_32_unaligned(dst.data(), src.data(), count);
+    for (size_t i = 0; i < src.size(); i += 4) {
+      // Check src is untouched
+      REQUIRE(static_cast<size_t>(src[i + 0]) == i + 1);
+      REQUIRE(static_cast<size_t>(src[i + 1]) == i + 2);
+      REQUIRE(static_cast<size_t>(src[i + 2]) == i + 3);
+      REQUIRE(static_cast<size_t>(src[i + 3]) == i + 4);
+      // Check swapped bytes
+      REQUIRE(static_cast<size_t>(dst[i + 0]) ==
+              static_cast<size_t>(src[i + 3]));
+      REQUIRE(static_cast<size_t>(dst[i + 1]) ==
+              static_cast<size_t>(src[i + 2]));
+      REQUIRE(static_cast<size_t>(dst[i + 2]) ==
+              static_cast<size_t>(src[i + 1]));
+      REQUIRE(static_cast<size_t>(dst[i + 3]) ==
+              static_cast<size_t>(src[i + 0]));
+    }
+  }
 
   uint64_t e;
   copy_and_swap_32_unaligned(&e, d, 2);
@@ -259,7 +305,7 @@ TEST_CASE("copy_and_swap_32_unaligned", "Copy and Swap") {
                       "regnahtats radnla dmngi.tne") == 0);
 }
 
-TEST_CASE("copy_and_swap_64_aligned", "Copy and Swap") {
+TEST_CASE("copy_and_swap_64_aligned", "[copy_and_swap]") {
   alignas(64) uint64_t a = 0x1111111111111111, b = 0x0123456789ABCDEF;
   copy_and_swap_64_aligned(&a, &b, 1);
   REQUIRE(a == 0xEFCDAB8967452301);
@@ -317,7 +363,7 @@ TEST_CASE("copy_and_swap_64_aligned", "Copy and Swap") {
   REQUIRE(std::strcmp(f, "radnats mngila d") == 0);
 }
 
-TEST_CASE("copy_and_swap_64_unaligned", "Copy and Swap") {
+TEST_CASE("copy_and_swap_64_unaligned", "[copy_and_swap]") {
   uint64_t a = 0x1111111111111111, b = 0x0123456789ABCDEF;
   copy_and_swap_64_unaligned(&a, &b, 1);
   REQUIRE(a == 0xEFCDAB8967452301);
@@ -407,14 +453,57 @@ TEST_CASE("copy_and_swap_64_unaligned", "Copy and Swap") {
                       "regradnats mngila d") == 0);
 }
 
-TEST_CASE("copy_and_swap_16_in_32_aligned", "Copy and Swap") {
-  // TODO(bwrsandman): test once properly understood.
-  REQUIRE(true == true);
+TEST_CASE("copy_and_swap_16_in_32_aligned", "[copy_and_swap]") {
+  constexpr size_t count = 17;
+  alignas(16) std::array<uint8_t, count * 4> src{};
+  alignas(16) std::array<uint8_t, count * 4> dst{};
+
+  // Check alignment (if this fails, adjust allocation)
+  REQUIRE((reinterpret_cast<uintptr_t>(src.data()) & 0xF) == 0);
+  REQUIRE((reinterpret_cast<uintptr_t>(dst.data()) & 0xF) == 0);
+
+  for (size_t i = 0; i < src.size(); ++i) {
+    src[i] = static_cast<uint8_t>(i) + 1;  // no zero in array
+  }
+
+  copy_and_swap_16_in_32_aligned(dst.data(), src.data(), count);
+
+  for (size_t i = 0; i < src.size(); i += 4) {
+    // Check src is untouched
+    REQUIRE(static_cast<size_t>(src[i + 0]) == i + 1);
+    REQUIRE(static_cast<size_t>(src[i + 1]) == i + 2);
+    REQUIRE(static_cast<size_t>(src[i + 2]) == i + 3);
+    REQUIRE(static_cast<size_t>(src[i + 3]) == i + 4);
+    // Check swapped bytes
+    REQUIRE(static_cast<size_t>(dst[i + 0]) == static_cast<size_t>(src[i + 2]));
+    REQUIRE(static_cast<size_t>(dst[i + 1]) == static_cast<size_t>(src[i + 3]));
+    REQUIRE(static_cast<size_t>(dst[i + 2]) == static_cast<size_t>(src[i + 0]));
+    REQUIRE(static_cast<size_t>(dst[i + 3]) == static_cast<size_t>(src[i + 1]));
+  }
 }
 
-TEST_CASE("copy_and_swap_16_in_32_unaligned", "Copy and Swap") {
-  // TODO(bwrsandman): test once properly understood.
-  REQUIRE(true == true);
+TEST_CASE("copy_and_swap_16_in_32_unaligned", "[copy_and_swap]") {
+  constexpr size_t count = 17;
+  std::array<uint8_t, count * 4> src{};
+  std::array<uint8_t, count * 4> dst{};
+  for (size_t i = 0; i < src.size(); ++i) {
+    src[i] = static_cast<uint8_t>(i) + 1;  // no zero in array
+  }
+
+  copy_and_swap_16_in_32_unaligned(dst.data(), src.data(), count);
+
+  for (size_t i = 0; i < src.size(); i += 4) {
+    // Check src is untouched
+    REQUIRE(static_cast<size_t>(src[i + 0]) == i + 1);
+    REQUIRE(static_cast<size_t>(src[i + 1]) == i + 2);
+    REQUIRE(static_cast<size_t>(src[i + 2]) == i + 3);
+    REQUIRE(static_cast<size_t>(src[i + 3]) == i + 4);
+    // Check swapped bytes
+    REQUIRE(static_cast<size_t>(dst[i + 0]) == static_cast<size_t>(src[i + 2]));
+    REQUIRE(static_cast<size_t>(dst[i + 1]) == static_cast<size_t>(src[i + 3]));
+    REQUIRE(static_cast<size_t>(dst[i + 2]) == static_cast<size_t>(src[i + 0]));
+    REQUIRE(static_cast<size_t>(dst[i + 3]) == static_cast<size_t>(src[i + 1]));
+  }
 }
 
 TEST_CASE("create_and_close_file_mapping", "Virtual Memory Mapping") {
@@ -425,7 +514,7 @@ TEST_CASE("create_and_close_file_mapping", "Virtual Memory Mapping") {
   xe::memory::CloseFileMappingHandle(memory, path);
 }
 
-TEST_CASE("map_view", "Virtual Memory Mapping") {
+TEST_CASE("map_view", "[virtual_memory_mapping]") {
   auto path = fmt::format("xenia_test_{}", Clock::QueryHostTickCount());
   const size_t length = 0x100;
   auto memory = xe::memory::CreateFileMappingHandle(
@@ -442,7 +531,7 @@ TEST_CASE("map_view", "Virtual Memory Mapping") {
   xe::memory::CloseFileMappingHandle(memory, path);
 }
 
-TEST_CASE("read_write_view", "Virtual Memory Mapping") {
+TEST_CASE("read_write_view", "[virtual_memory_mapping]") {
   const size_t length = 0x100;
   auto path = fmt::format("xenia_test_{}", Clock::QueryHostTickCount());
   auto memory = xe::memory::CreateFileMappingHandle(
@@ -467,6 +556,40 @@ TEST_CASE("read_write_view", "Virtual Memory Mapping") {
 
   xe::memory::UnmapFileView(memory, reinterpret_cast<void*>(address), length);
   xe::memory::CloseFileMappingHandle(memory, path);
+}
+
+TEST_CASE("make_fourcc", "[fourcc]") {
+  SECTION("'1234'") {
+    const uint32_t fourcc_host = 0x31323334;
+    constexpr fourcc_t fourcc_1 = make_fourcc('1', '2', '3', '4');
+    constexpr fourcc_t fourcc_2 = make_fourcc("1234");
+    REQUIRE(fourcc_1 == fourcc_host);
+    REQUIRE(fourcc_2 == fourcc_host);
+    REQUIRE(fourcc_1 == fourcc_2);
+    REQUIRE(fourcc_2 == fourcc_1);
+  }
+
+  SECTION("'ABcd'") {
+    const uint32_t fourcc_host = 0x41426364;
+    constexpr fourcc_t fourcc_1 = make_fourcc('A', 'B', 'c', 'd');
+    constexpr fourcc_t fourcc_2 = make_fourcc("ABcd");
+    REQUIRE(fourcc_1 == fourcc_host);
+    REQUIRE(fourcc_2 == fourcc_host);
+    REQUIRE(fourcc_1 == fourcc_2);
+    REQUIRE(fourcc_2 == fourcc_1);
+  }
+
+  SECTION("'XEN\\0'") {
+    const uint32_t fourcc_host = 0x58454E00;
+    constexpr fourcc_t fourcc = make_fourcc('X', 'E', 'N', '\0');
+    REQUIRE(fourcc == fourcc_host);
+  }
+
+  SECTION("length()!=4") {
+    REQUIRE_THROWS(make_fourcc("AB\0\0"));
+    REQUIRE_THROWS(make_fourcc("AB\0\0AB"));
+    REQUIRE_THROWS(make_fourcc("ABCDEFGH"));
+  }
 }
 
 }  // namespace test

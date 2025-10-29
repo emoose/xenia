@@ -29,15 +29,24 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
+    non_seamless_cube_map, true,
+    "Disable filtering between cube map faces near edges where possible "
+    "(Vulkan with VK_EXT_non_seamless_cube_map) to reproduce the Direct3D 9 "
+    "behavior.",
+    "GPU");
+
+// Extremely bright screen borders in 4D5307E6.
+// Reading between texels with half-pixel offset in 58410954.
+DEFINE_bool(
     half_pixel_offset, true,
     "Enable support of vertex half-pixel offset (D3D9 PA_SU_VTX_CNTL "
     "PIX_CENTER). Generally games are aware of the half-pixel offset, and "
     "having this enabled is the correct behavior (disabling this may "
-    "significantly break post-processing in some games, like Halo 3), but in "
-    "some games it might have been ignored, resulting in slight blurriness of "
-    "UI textures, for instance, when they are read between texels rather than "
-    "at texel centers (Banjo-Kazooie), or the leftmost/topmost pixels may not "
-    "be fully covered when MSAA is used with fullscreen passes.",
+    "significantly break post-processing in some games), but in certain games "
+    "it might have been ignored, resulting in slight blurriness of UI "
+    "textures, for instance, when they are read between texels rather than "
+    "at texel centers, or the leftmost/topmost pixels may not be fully covered "
+    "when MSAA is used with fullscreen passes.",
     "GPU");
 
 DEFINE_int32(query_occlusion_fake_sample_count, 1000,

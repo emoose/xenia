@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -12,11 +12,13 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
+#include <cstring>
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/ring_buffer.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -41,31 +43,31 @@ CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
       trace_writer_(graphics_system->memory()->physical_membase()),
       worker_running_(true),
       write_ptr_index_event_(xe::threading::Event::CreateAutoResetEvent(false)),
-      write_ptr_index_(0) {}
+      write_ptr_index_(0) {
+  assert_not_null(write_ptr_index_event_);
+}
 
 CommandProcessor::~CommandProcessor() = default;
 
-bool CommandProcessor::Initialize(
-    std::unique_ptr<xe::ui::GraphicsContext> context) {
-  context_ = std::move(context);
-
+bool CommandProcessor::Initialize() {
   // Initialize the gamma ramps to their default (linear) values - taken from
-  // what games set when starting.
+  // what games set when starting with the sRGB (return value 1)
+  // VdGetCurrentDisplayGamma.
   for (uint32_t i = 0; i < 256; ++i) {
-    uint32_t value = i * 1023 / 255;
-    gamma_ramp_.normal[i].value = value | (value << 10) | (value << 20);
+    uint32_t value = i * 0x3FF / 0xFF;
+    reg::DC_LUT_30_COLOR& gamma_ramp_entry = gamma_ramp_256_entry_table_[i];
+    gamma_ramp_entry.color_10_blue = value;
+    gamma_ramp_entry.color_10_green = value;
+    gamma_ramp_entry.color_10_red = value;
   }
   for (uint32_t i = 0; i < 128; ++i) {
-    uint32_t value = (i * 65535 / 127) & ~63;
-    if (i < 127) {
-      value |= 0x200 << 16;
-    }
+    reg::DC_LUT_PWL_DATA gamma_ramp_entry = {};
+    gamma_ramp_entry.base = (i * 0xFFFF / 0x7F) & ~UINT32_C(0x3F);
+    gamma_ramp_entry.delta = i < 0x7F ? 0x200 : 0;
     for (uint32_t j = 0; j < 3; ++j) {
-      gamma_ramp_.pwl[i].values[j].value = value;
+      gamma_ramp_pwl_rgb_[i][j] = gamma_ramp_entry;
     }
   }
-  dirty_gamma_ramp_normal_ = true;
-  dirty_gamma_ramp_pwl_ = true;
 
   worker_running_ = true;
   worker_thread_ = kernel::object_ref<kernel::XHostThread>(
@@ -129,6 +131,46 @@ void CommandProcessor::EndTracing() {
   trace_writer_.Close();
 }
 
+void CommandProcessor::RestoreRegisters(uint32_t first_register,
+                                        const uint32_t* register_values,
+                                        uint32_t register_count,
+                                        bool execute_callbacks) {
+  if (first_register > RegisterFile::kRegisterCount ||
+      RegisterFile::kRegisterCount - first_register < register_count) {
+    XELOGW(
+        "CommandProcessor::RestoreRegisters out of bounds (0x{:X} registers "
+        "starting with 0x{:X}, while a total of 0x{:X} registers are stored)",
+        register_count, first_register, RegisterFile::kRegisterCount);
+    if (first_register > RegisterFile::kRegisterCount) {
+      return;
+    }
+    register_count =
+        std::min(uint32_t(RegisterFile::kRegisterCount) - first_register,
+                 register_count);
+  }
+  if (execute_callbacks) {
+    for (uint32_t i = 0; i < register_count; ++i) {
+      WriteRegister(first_register + i, register_values[i]);
+    }
+  } else {
+    std::memcpy(register_file_->values + first_register, register_values,
+                sizeof(uint32_t) * register_count);
+  }
+}
+
+void CommandProcessor::RestoreGammaRamp(
+    const reg::DC_LUT_30_COLOR* new_gamma_ramp_256_entry_table,
+    const reg::DC_LUT_PWL_DATA* new_gamma_ramp_pwl_rgb,
+    uint32_t new_gamma_ramp_rw_component) {
+  std::memcpy(gamma_ramp_256_entry_table_, new_gamma_ramp_256_entry_table,
+              sizeof(reg::DC_LUT_30_COLOR) * 256);
+  std::memcpy(gamma_ramp_pwl_rgb_, new_gamma_ramp_pwl_rgb,
+              sizeof(reg::DC_LUT_PWL_DATA) * 3 * 128);
+  gamma_ramp_rw_component_ = new_gamma_ramp_rw_component;
+  OnGammaRamp256EntryTableValueWritten();
+  OnGammaRampPWLValueWritten();
+}
+
 void CommandProcessor::CallInThread(std::function<void()> fn) {
   if (pending_fns_.empty() &&
       kernel::XThread::IsInThread(worker_thread_.get())) {
@@ -140,8 +182,18 @@ void CommandProcessor::CallInThread(std::function<void()> fn) {
 
 void CommandProcessor::ClearCaches() {}
 
+void CommandProcessor::SetDesiredSwapPostEffect(
+    SwapPostEffect swap_post_effect) {
+  if (swap_post_effect_desired_ == swap_post_effect) {
+    return;
+  }
+  swap_post_effect_desired_ = swap_post_effect;
+  CallInThread([this, swap_post_effect]() {
+    swap_post_effect_actual_ = swap_post_effect;
+  });
+}
+
 void CommandProcessor::WorkerThreadMain() {
-  context_->MakeCurrent();
   if (!SetupContext()) {
     xe::FatalError("Unable to setup command processor internal state");
     return;
@@ -212,9 +264,6 @@ void CommandProcessor::Pause() {
     threading::Thread::GetCurrentThread()->Suspend();
   });
 
-  // HACK - Prevents a hang in IssueSwap()
-  swap_state_.pending = false;
-
   fence.Wait();
 }
 
@@ -255,7 +304,7 @@ bool CommandProcessor::Restore(ByteStream* stream) {
 
 bool CommandProcessor::SetupContext() { return true; }
 
-void CommandProcessor::ShutdownContext() { context_.reset(); }
+void CommandProcessor::ShutdownContext() {}
 
 void CommandProcessor::InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) {
   read_ptr_index_ = 0;
@@ -280,65 +329,156 @@ void CommandProcessor::UpdateWritePointer(uint32_t value) {
 }
 
 void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
-  RegisterFile* regs = register_file_;
+  RegisterFile& regs = *register_file_;
   if (index >= RegisterFile::kRegisterCount) {
     XELOGW("CommandProcessor::WriteRegister index out of bounds: {}", index);
     return;
   }
 
-  regs->values[index].u32 = value;
-  if (!regs->GetRegisterInfo(index)) {
+  // Volatile for the WAIT_REG_MEM loop.
+  const_cast<volatile uint32_t&>(regs.values[index]) = value;
+  if (!regs.GetRegisterInfo(index)) {
     XELOGW("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
-  }
-
-  // If this is a COHER register, set the dirty flag.
-  // This will block the command processor the next time it WAIT_MEM_REGs and
-  // allow us to synchronize the memory.
-  if (index == XE_GPU_REG_COHER_STATUS_HOST) {
-    regs->values[index].u32 |= 0x80000000ul;
   }
 
   // Scratch register writeback.
   if (index >= XE_GPU_REG_SCRATCH_REG0 && index <= XE_GPU_REG_SCRATCH_REG7) {
     uint32_t scratch_reg = index - XE_GPU_REG_SCRATCH_REG0;
-    if ((1 << scratch_reg) & regs->values[XE_GPU_REG_SCRATCH_UMSK].u32) {
+    if ((1 << scratch_reg) & regs.values[XE_GPU_REG_SCRATCH_UMSK]) {
       // Enabled - write to address.
-      uint32_t scratch_addr = regs->values[XE_GPU_REG_SCRATCH_ADDR].u32;
+      uint32_t scratch_addr = regs.values[XE_GPU_REG_SCRATCH_ADDR];
       uint32_t mem_addr = scratch_addr + (scratch_reg * 4);
       xe::store_and_swap<uint32_t>(memory_->TranslatePhysical(mem_addr), value);
     }
-  }
-}
+  } else {
+    switch (index) {
+      // If this is a COHER register, set the dirty flag.
+      // This will block the command processor the next time it WAIT_REG_MEMs
+      // and allow us to synchronize the memory.
+      case XE_GPU_REG_COHER_STATUS_HOST: {
+        const_cast<volatile uint32_t&>(regs.values[index]) |=
+            UINT32_C(0x80000000);
+      } break;
 
-void CommandProcessor::UpdateGammaRampValue(GammaRampType type,
-                                            uint32_t value) {
-  RegisterFile* regs = register_file_;
+      case XE_GPU_REG_DC_LUT_RW_INDEX: {
+        // Reset the sequential read / write component index (see the M56
+        // DC_LUT_SEQ_COLOR documentation).
+        gamma_ramp_rw_component_ = 0;
+      } break;
 
-  auto index = regs->values[XE_GPU_REG_DC_LUT_RW_INDEX].u32;
+      case XE_GPU_REG_DC_LUT_SEQ_COLOR: {
+        // Should be in the 256-entry table writing mode.
+        assert_zero(regs[XE_GPU_REG_DC_LUT_RW_MODE] & 0b1);
+        auto gamma_ramp_rw_index = regs.Get<reg::DC_LUT_RW_INDEX>();
+        // DC_LUT_SEQ_COLOR is in the red, green, blue order, but the write
+        // enable mask is blue, green, red.
+        bool write_gamma_ramp_component =
+            (regs[XE_GPU_REG_DC_LUT_WRITE_EN_MASK] &
+             (UINT32_C(1) << (2 - gamma_ramp_rw_component_))) != 0;
+        if (write_gamma_ramp_component) {
+          reg::DC_LUT_30_COLOR& gamma_ramp_entry =
+              gamma_ramp_256_entry_table_[gamma_ramp_rw_index.rw_index];
+          // Bits 0:5 are hardwired to zero.
+          uint32_t gamma_ramp_seq_color =
+              regs.Get<reg::DC_LUT_SEQ_COLOR>().seq_color >> 6;
+          switch (gamma_ramp_rw_component_) {
+            case 0:
+              gamma_ramp_entry.color_10_red = gamma_ramp_seq_color;
+              break;
+            case 1:
+              gamma_ramp_entry.color_10_green = gamma_ramp_seq_color;
+              break;
+            case 2:
+              gamma_ramp_entry.color_10_blue = gamma_ramp_seq_color;
+              break;
+          }
+        }
+        if (++gamma_ramp_rw_component_ >= 3) {
+          gamma_ramp_rw_component_ = 0;
+          reg::DC_LUT_RW_INDEX new_gamma_ramp_rw_index = gamma_ramp_rw_index;
+          ++new_gamma_ramp_rw_index.rw_index;
+          WriteRegister(
+              XE_GPU_REG_DC_LUT_RW_INDEX,
+              xe::memory::Reinterpret<uint32_t>(new_gamma_ramp_rw_index));
+        }
+        if (write_gamma_ramp_component) {
+          OnGammaRamp256EntryTableValueWritten();
+        }
+      } break;
 
-  auto mask = regs->values[XE_GPU_REG_DC_LUT_WRITE_EN_MASK].u32;
-  auto mask_lo = (mask >> 0) & 0x7;
-  auto mask_hi = (mask >> 3) & 0x7;
+      case XE_GPU_REG_DC_LUT_PWL_DATA: {
+        // Should be in the PWL writing mode.
+        assert_not_zero(regs[XE_GPU_REG_DC_LUT_RW_MODE] & 0b1);
+        auto gamma_ramp_rw_index = regs.Get<reg::DC_LUT_RW_INDEX>();
+        // Bit 7 of the index is ignored for PWL.
+        uint32_t gamma_ramp_rw_index_pwl = gamma_ramp_rw_index.rw_index & 0x7F;
+        // DC_LUT_PWL_DATA is likely in the red, green, blue order because
+        // DC_LUT_SEQ_COLOR is, but the write enable mask is blue, green, red.
+        bool write_gamma_ramp_component =
+            (regs[XE_GPU_REG_DC_LUT_WRITE_EN_MASK] &
+             (UINT32_C(1) << (2 - gamma_ramp_rw_component_))) != 0;
+        if (write_gamma_ramp_component) {
+          reg::DC_LUT_PWL_DATA& gamma_ramp_entry =
+              gamma_ramp_pwl_rgb_[gamma_ramp_rw_index_pwl]
+                                 [gamma_ramp_rw_component_];
+          auto gamma_ramp_value = regs.Get<reg::DC_LUT_PWL_DATA>();
+          // Bits 0:5 are hardwired to zero.
+          gamma_ramp_entry.base = gamma_ramp_value.base & ~UINT32_C(0x3F);
+          gamma_ramp_entry.delta = gamma_ramp_value.delta & ~UINT32_C(0x3F);
+        }
+        if (++gamma_ramp_rw_component_ >= 3) {
+          gamma_ramp_rw_component_ = 0;
+          reg::DC_LUT_RW_INDEX new_gamma_ramp_rw_index = gamma_ramp_rw_index;
+          // TODO(Triang3l): Should this increase beyond 7 bits for PWL?
+          // Direct3D 9 explicitly sets rw_index to 0x80 after writing the last
+          // PWL entry. However, the DC_LUT_RW_INDEX documentation says that for
+          // PWL, the bit 7 is ignored.
+          new_gamma_ramp_rw_index.rw_index =
+              (gamma_ramp_rw_index.rw_index & ~UINT32_C(0x7F)) |
+              ((gamma_ramp_rw_index_pwl + 1) & 0x7F);
+          WriteRegister(
+              XE_GPU_REG_DC_LUT_RW_INDEX,
+              xe::memory::Reinterpret<uint32_t>(new_gamma_ramp_rw_index));
+        }
+        if (write_gamma_ramp_component) {
+          OnGammaRampPWLValueWritten();
+        }
+      } break;
 
-  // If games update individual components we're going to have a problem.
-  assert_true(mask_lo == 0 || mask_lo == 7);
-  assert_true(mask_hi == 0);
-
-  if (mask_lo) {
-    switch (type) {
-      case GammaRampType::kNormal:
-        assert_true(regs->values[XE_GPU_REG_DC_LUT_RW_MODE].u32 == 0);
-        gamma_ramp_.normal[index].value = value;
-        dirty_gamma_ramp_normal_ = true;
-        break;
-      case GammaRampType::kPWL:
-        assert_true(regs->values[XE_GPU_REG_DC_LUT_RW_MODE].u32 == 1);
-        gamma_ramp_.pwl[index].values[gamma_ramp_rw_subindex_].value = value;
-        gamma_ramp_rw_subindex_ = (gamma_ramp_rw_subindex_ + 1) % 3;
-        dirty_gamma_ramp_pwl_ = true;
-        break;
-      default:
-        assert_unhandled_case(type);
+      case XE_GPU_REG_DC_LUT_30_COLOR: {
+        // Should be in the 256-entry table writing mode.
+        assert_zero(regs[XE_GPU_REG_DC_LUT_RW_MODE] & 0b1);
+        auto gamma_ramp_rw_index = regs.Get<reg::DC_LUT_RW_INDEX>();
+        uint32_t gamma_ramp_write_enable_mask =
+            regs[XE_GPU_REG_DC_LUT_WRITE_EN_MASK] & 0b111;
+        if (gamma_ramp_write_enable_mask) {
+          reg::DC_LUT_30_COLOR& gamma_ramp_entry =
+              gamma_ramp_256_entry_table_[gamma_ramp_rw_index.rw_index];
+          auto gamma_ramp_value = regs.Get<reg::DC_LUT_30_COLOR>();
+          if (gamma_ramp_write_enable_mask & 0b001) {
+            gamma_ramp_entry.color_10_blue = gamma_ramp_value.color_10_blue;
+          }
+          if (gamma_ramp_write_enable_mask & 0b010) {
+            gamma_ramp_entry.color_10_green = gamma_ramp_value.color_10_green;
+          }
+          if (gamma_ramp_write_enable_mask & 0b100) {
+            gamma_ramp_entry.color_10_red = gamma_ramp_value.color_10_red;
+          }
+        }
+        // TODO(Triang3l): Should this reset the component write index? If this
+        // increase is assumed to behave like a full DC_LUT_RW_INDEX write, it
+        // probably should. Currently this also calls WriteRegister for
+        // DC_LUT_RW_INDEX, which resets gamma_ramp_rw_component_ as well.
+        gamma_ramp_rw_component_ = 0;
+        reg::DC_LUT_RW_INDEX new_gamma_ramp_rw_index = gamma_ramp_rw_index;
+        ++new_gamma_ramp_rw_index.rw_index;
+        WriteRegister(
+            XE_GPU_REG_DC_LUT_RW_INDEX,
+            xe::memory::Reinterpret<uint32_t>(new_gamma_ramp_rw_index));
+        if (gamma_ramp_write_enable_mask) {
+          OnGammaRamp256EntryTableValueWritten();
+        }
+      } break;
     }
   }
 }
@@ -355,10 +495,12 @@ void CommandProcessor::MakeCoherent() {
   // https://web.archive.org/web/20160711162346/https://amd-dev.wpengine.netdna-cdn.com/wordpress/media/2013/10/R6xx_R7xx_3D.pdf
   // https://cgit.freedesktop.org/xorg/driver/xf86-video-radeonhd/tree/src/r6xx_accel.c?id=3f8b6eccd9dba116cc4801e7f80ce21a879c67d2#n454
 
-  RegisterFile* regs = register_file_;
-  auto& status_host = regs->Get<reg::COHER_STATUS_HOST>();
-  auto base_host = regs->values[XE_GPU_REG_COHER_BASE_HOST].u32;
-  auto size_host = regs->values[XE_GPU_REG_COHER_SIZE_HOST].u32;
+  // Volatile because this may be called from the WAIT_REG_MEM loop.
+  volatile uint32_t* regs_volatile = register_file_->values;
+  auto status_host = xe::memory::Reinterpret<reg::COHER_STATUS_HOST>(
+      uint32_t(regs_volatile[XE_GPU_REG_COHER_STATUS_HOST]));
+  uint32_t base_host = regs_volatile[XE_GPU_REG_COHER_BASE_HOST];
+  uint32_t size_host = regs_volatile[XE_GPU_REG_COHER_SIZE_HOST];
 
   if (!status_host.status) {
     return;
@@ -378,57 +520,12 @@ void CommandProcessor::MakeCoherent() {
          base_host + size_host, size_host, action);
 
   // Mark coherent.
-  status_host.status = 0;
+  regs_volatile[XE_GPU_REG_COHER_STATUS_HOST] = 0;
 }
 
 void CommandProcessor::PrepareForWait() { trace_writer_.Flush(); }
 
 void CommandProcessor::ReturnFromWait() {}
-
-void CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
-                                 uint32_t frontbuffer_width,
-                                 uint32_t frontbuffer_height) {
-  SCOPE_profile_cpu_f("gpu");
-  if (!swap_request_handler_) {
-    return;
-  }
-
-  // If there was a swap pending we drop it on the floor.
-  // This prevents the display from pulling the backbuffer out from under us.
-  // If we skip a lot then we may need to buffer more, but as the display
-  // thread should be fairly idle that shouldn't happen.
-  if (!cvars::vsync) {
-    std::lock_guard<std::mutex> lock(swap_state_.mutex);
-    if (swap_state_.pending) {
-      swap_state_.pending = false;
-      // TODO(benvanik): frame skip counter.
-      XELOGW("Skipped frame!");
-    }
-  } else {
-    // Spin until no more pending swap.
-    while (worker_running_) {
-      {
-        std::lock_guard<std::mutex> lock(swap_state_.mutex);
-        if (!swap_state_.pending) {
-          break;
-        }
-      }
-      xe::threading::MaybeYield();
-    }
-  }
-
-  PerformSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
-
-  {
-    // Set pending so that the display will swap the next time it can.
-    std::lock_guard<std::mutex> lock(swap_state_.mutex);
-    swap_state_.pending = true;
-  }
-
-  // Notify the display a swap is pending so that our changes are picked up.
-  // It does the actual front/back buffer swap.
-  swap_request_handler_();
-}
 
 uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index,
                                                 uint32_t write_index) {
@@ -440,7 +537,7 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index,
     uint32_t title_id = kernel_state_->GetExecutableModule()
                             ? kernel_state_->GetExecutableModule()->title_id()
                             : 0;
-    auto file_name = fmt::format("{:8X}_stream.xtr", title_id);
+    auto file_name = fmt::format("{:08X}_stream.xtr", title_id);
     auto path = trace_stream_path_ / file_name;
     trace_writer_.Open(path, title_id);
     InitializeTrace();
@@ -515,6 +612,10 @@ bool CommandProcessor::ExecutePacket(RingBuffer* reader) {
     trace_writer_.WritePacketStart(uint32_t(reader->read_ptr() - 4), 1);
     trace_writer_.WritePacketEnd();
     return true;
+  }
+
+  if (packet == 0xCDCDCDCD) {
+    XELOGW("GPU packet is CDCDCDCD - probably read uninitialized memory!");
   }
 
   switch (packet_type) {
@@ -734,7 +835,7 @@ bool CommandProcessor::ExecutePacketType3(RingBuffer* reader, uint32_t packet) {
       break;
     }
     case PM4_WAIT_FOR_IDLE: {
-      // This opcode is used by "Duke Nukem Forever" while going/being ingame
+      // This opcode is used by 5454084E while going / being ingame.
       assert_true(count == 1);
       uint32_t value = reader->ReadAndSwap<uint32_t>();
       XELOGGPU("GPU wait for idle = {:08X}", value);
@@ -763,7 +864,7 @@ bool CommandProcessor::ExecutePacketType3(RingBuffer* reader, uint32_t packet) {
     } else if (trace_state_ == TraceState::kSingleFrame) {
       // New trace request - we only start tracing at the beginning of a frame.
       uint32_t title_id = kernel_state_->GetExecutableModule()->title_id();
-      auto file_name = fmt::format("{:8X}_{}.xtr", title_id, counter_ - 1);
+      auto file_name = fmt::format("{:08X}_{}.xtr", title_id, counter_ - 1);
       auto path = trace_frame_path_ / file_name;
       trace_writer_.Open(path, title_id);
       InitializeTrace();
@@ -824,8 +925,8 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(RingBuffer* reader,
   // VdSwap will post this to tell us we need to swap the screen/fire an
   // interrupt.
   // 63 words here, but only the first has any data.
-  uint32_t magic = reader->ReadAndSwap<uint32_t>();
-  assert_true(magic == 'SWAP');
+  uint32_t magic = reader->ReadAndSwap<fourcc_t>();
+  assert_true(magic == kSwapSignature);
 
   // TODO(benvanik): only swap frontbuffer ptr.
   uint32_t frontbuffer_ptr = reader->ReadAndSwap<uint32_t>();
@@ -833,9 +934,7 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(RingBuffer* reader,
   uint32_t frontbuffer_height = reader->ReadAndSwap<uint32_t>();
   reader->AdvanceRead((count - 4) * sizeof(uint32_t));
 
-  if (swap_mode_ == SwapMode::kNormal) {
-    IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
-  }
+  IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
 
   ++counter_;
   return true;
@@ -859,28 +958,33 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(RingBuffer* reader,
   SCOPE_profile_cpu_f("gpu");
 
   // wait until a register or memory location is a specific value
+
   uint32_t wait_info = reader->ReadAndSwap<uint32_t>();
   uint32_t poll_reg_addr = reader->ReadAndSwap<uint32_t>();
   uint32_t ref = reader->ReadAndSwap<uint32_t>();
   uint32_t mask = reader->ReadAndSwap<uint32_t>();
   uint32_t wait = reader->ReadAndSwap<uint32_t>();
+
+  bool is_memory = (wait_info & 0x10) != 0;
+
+  assert_true(is_memory || poll_reg_addr < RegisterFile::kRegisterCount);
+  const volatile uint32_t& value_ref =
+      is_memory ? *reinterpret_cast<uint32_t*>(memory_->TranslatePhysical(
+                      poll_reg_addr & ~uint32_t(0x3)))
+                : register_file_->values[poll_reg_addr];
+
   bool matched = false;
   do {
-    uint32_t value;
-    if (wait_info & 0x10) {
-      // Memory.
-      auto endianness = static_cast<xenos::Endian>(poll_reg_addr & 0x3);
-      poll_reg_addr &= ~0x3;
-      value = xe::load<uint32_t>(memory_->TranslatePhysical(poll_reg_addr));
-      value = GpuSwap(value, endianness);
-      trace_writer_.WriteMemoryRead(CpuToGpu(poll_reg_addr), 4);
+    uint32_t value = value_ref;
+    if (is_memory) {
+      trace_writer_.WriteMemoryRead(CpuToGpu(poll_reg_addr & ~uint32_t(0x3)),
+                                    sizeof(uint32_t));
+      value = xenos::GpuSwap(value,
+                             static_cast<xenos::Endian>(poll_reg_addr & 0x3));
     } else {
-      // Register.
-      assert_true(poll_reg_addr < RegisterFile::kRegisterCount);
-      value = register_file_->values[poll_reg_addr].u32;
       if (poll_reg_addr == XE_GPU_REG_COHER_STATUS_HOST) {
         MakeCoherent();
-        value = register_file_->values[poll_reg_addr].u32;
+        value = value_ref;
       }
     }
     switch (wait_info & 0x7) {
@@ -943,17 +1047,17 @@ bool CommandProcessor::ExecutePacketType3_REG_RMW(RingBuffer* reader,
   uint32_t rmw_info = reader->ReadAndSwap<uint32_t>();
   uint32_t and_mask = reader->ReadAndSwap<uint32_t>();
   uint32_t or_mask = reader->ReadAndSwap<uint32_t>();
-  uint32_t value = register_file_->values[rmw_info & 0x1FFF].u32;
+  uint32_t value = register_file_->values[rmw_info & 0x1FFF];
   if ((rmw_info >> 31) & 0x1) {
     // & reg
-    value &= register_file_->values[and_mask & 0x1FFF].u32;
+    value &= register_file_->values[and_mask & 0x1FFF];
   } else {
     // & imm
     value &= and_mask;
   }
   if ((rmw_info >> 30) & 0x1) {
     // | reg
-    value |= register_file_->values[or_mask & 0x1FFF].u32;
+    value |= register_file_->values[or_mask & 0x1FFF];
   } else {
     // | imm
     value |= or_mask;
@@ -974,7 +1078,7 @@ bool CommandProcessor::ExecutePacketType3_REG_TO_MEM(RingBuffer* reader,
   uint32_t reg_val;
 
   assert_true(reg_addr < RegisterFile::kRegisterCount);
-  reg_val = register_file_->values[reg_addr].u32;
+  reg_val = register_file_->values[reg_addr];
 
   auto endianness = static_cast<xenos::Endian>(mem_addr & 0x3);
   mem_addr &= ~0x3;
@@ -1024,7 +1128,7 @@ bool CommandProcessor::ExecutePacketType3_COND_WRITE(RingBuffer* reader,
   } else {
     // Register.
     assert_true(poll_reg_addr < RegisterFile::kRegisterCount);
-    value = register_file_->values[poll_reg_addr].u32;
+    value = register_file_->values[poll_reg_addr];
   }
   bool matched = false;
   switch (wait_info & 0x7) {
@@ -1145,6 +1249,8 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(RingBuffer* reader,
 bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(RingBuffer* reader,
                                                           uint32_t packet,
                                                           uint32_t count) {
+  // Set by D3D as BE but struct ABI is LE
+  const uint32_t kQueryFinished = xe::byte_swap(0xFFFFFEED);
   assert_true(count == 1);
   uint32_t initiator = reader->ReadAndSwap<uint32_t>();
   // Writeback initiator.
@@ -1157,13 +1263,16 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(RingBuffer* reader,
   if (fake_sample_count >= 0) {
     auto* pSampleCounts =
         memory_->TranslatePhysical<xe_gpu_depth_sample_counts*>(
-            register_file_->values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR].u32);
+            register_file_->values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR]);
     // 0xFFFFFEED is written to this two locations by D3D only on D3DISSUE_END
     // and used to detect a finished query.
-    bool isEnd = pSampleCounts->ZPass_A == xe::byte_swap(0xFFFFFEED) &&
-                 pSampleCounts->ZPass_B == xe::byte_swap(0xFFFFFEED);
+    bool is_end_via_z_pass = pSampleCounts->ZPass_A == kQueryFinished &&
+                             pSampleCounts->ZPass_B == kQueryFinished;
+    // Older versions of D3D also checks for ZFail (4D5307D5).
+    bool is_end_via_z_fail = pSampleCounts->ZFail_A == kQueryFinished &&
+                             pSampleCounts->ZFail_B == kQueryFinished;
     std::memset(pSampleCounts, 0, sizeof(xe_gpu_depth_sample_counts));
-    if (isEnd) {
+    if (is_end_via_z_pass || is_end_via_z_fail) {
       pSampleCounts->ZPass_A = fake_sample_count;
       pSampleCounts->Total_A = fake_sample_count;
     }
@@ -1172,40 +1281,77 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(RingBuffer* reader,
   return true;
 }
 
-bool CommandProcessor::ExecutePacketType3_DRAW_INDX(RingBuffer* reader,
-                                                    uint32_t packet,
-                                                    uint32_t count) {
-  // initiate fetch of index buffer and draw
-  // if dword0 != 0, this is a conditional draw based on viz query.
+bool CommandProcessor::ExecutePacketType3Draw(RingBuffer* reader,
+                                              uint32_t packet,
+                                              const char* opcode_name,
+                                              uint32_t viz_query_condition,
+                                              uint32_t count_remaining) {
+  // if viz_query_condition != 0, this is a conditional draw based on viz query.
   // This ID matches the one issued in PM4_VIZ_QUERY
-  uint32_t dword0 = reader->ReadAndSwap<uint32_t>();  // viz query info
-  // uint32_t viz_id = dword0 & 0x3F;
+  // uint32_t viz_id = viz_query_condition & 0x3F;
   // when true, render conditionally based on query result
-  // uint32_t viz_use = dword0 & 0x100;
+  // uint32_t viz_use = viz_query_condition & 0x100;
 
+  assert_not_zero(count_remaining);
+  if (!count_remaining) {
+    XELOGE("{}: Packet too small, can't read VGT_DRAW_INITIATOR", opcode_name);
+    return false;
+  }
   reg::VGT_DRAW_INITIATOR vgt_draw_initiator;
   vgt_draw_initiator.value = reader->ReadAndSwap<uint32_t>();
+  --count_remaining;
   WriteRegister(XE_GPU_REG_VGT_DRAW_INITIATOR, vgt_draw_initiator.value);
 
+  bool draw_succeeded = true;
+  // TODO(Triang3l): Remove IndexBufferInfo and replace handling of all this
+  // with PrimitiveProcessor when the old Vulkan renderer is removed.
   bool is_indexed = false;
   IndexBufferInfo index_buffer_info;
   switch (vgt_draw_initiator.source_select) {
     case xenos::SourceSelect::kDMA: {
       // Indexed draw.
       is_indexed = true;
-      index_buffer_info.guest_base = reader->ReadAndSwap<uint32_t>();
-      uint32_t index_size = reader->ReadAndSwap<uint32_t>();
-      index_buffer_info.endianness =
-          static_cast<xenos::Endian>(index_size >> 30);
-      index_size &= 0x00FFFFFF;
+
+      // Two separate bounds checks so if there's only one missing register
+      // value out of two, one uint32_t will be skipped in the command buffer,
+      // not two.
+      assert_not_zero(count_remaining);
+      if (!count_remaining) {
+        XELOGE("{}: Packet too small, can't read VGT_DMA_BASE", opcode_name);
+        return false;
+      }
+      uint32_t vgt_dma_base = reader->ReadAndSwap<uint32_t>();
+      --count_remaining;
+      WriteRegister(XE_GPU_REG_VGT_DMA_BASE, vgt_dma_base);
+      reg::VGT_DMA_SIZE vgt_dma_size;
+      assert_not_zero(count_remaining);
+      if (!count_remaining) {
+        XELOGE("{}: Packet too small, can't read VGT_DMA_SIZE", opcode_name);
+        return false;
+      }
+      vgt_dma_size.value = reader->ReadAndSwap<uint32_t>();
+      --count_remaining;
+      WriteRegister(XE_GPU_REG_VGT_DMA_SIZE, vgt_dma_size.value);
+
+      uint32_t index_size_bytes =
+          vgt_draw_initiator.index_size == xenos::IndexFormat::kInt16
+              ? sizeof(uint16_t)
+              : sizeof(uint32_t);
+      // The base address must already be word-aligned according to the R6xx
+      // documentation, but for safety.
+      index_buffer_info.guest_base = vgt_dma_base & ~(index_size_bytes - 1);
+      index_buffer_info.endianness = vgt_dma_size.swap_mode;
       index_buffer_info.format = vgt_draw_initiator.index_size;
-      index_size *=
-          (vgt_draw_initiator.index_size == xenos::IndexFormat::kInt32) ? 4 : 2;
-      index_buffer_info.length = index_size;
+      index_buffer_info.length = vgt_dma_size.num_words * index_size_bytes;
       index_buffer_info.count = vgt_draw_initiator.num_indices;
     } break;
     case xenos::SourceSelect::kImmediate: {
       // TODO(Triang3l): VGT_IMMED_DATA.
+      XELOGE(
+          "{}: Using immediate vertex indices, which are not supported yet. "
+          "Report the game to Xenia developers!",
+          opcode_name, uint32_t(vgt_draw_initiator.source_select));
+      draw_succeeded = false;
       assert_always();
     } break;
     case xenos::SourceSelect::kAutoIndex: {
@@ -1214,71 +1360,69 @@ bool CommandProcessor::ExecutePacketType3_DRAW_INDX(RingBuffer* reader,
       index_buffer_info.length = 0;
     } break;
     default: {
-      // Invalid source select.
-      assert_always();
+      // Invalid source selection.
+      draw_succeeded = false;
+      assert_unhandled_case(vgt_draw_initiator.source_select);
     } break;
   }
 
-  auto viz_query = register_file_->Get<reg::PA_SC_VIZ_QUERY>();
-  if (viz_query.viz_query_ena && viz_query.kill_pix_post_hi_z) {
-    // TODO(Triang3l): Don't drop the draw call completely if the vertex shader
-    // has memexport.
-    // TODO(Triang3l || JoelLinn): Handle this properly in the render backends.
-    return true;
+  // Skip to the next command, for example, if there are immediate indexes that
+  // we don't support yet.
+  reader->AdvanceRead(count_remaining * sizeof(uint32_t));
+
+  if (draw_succeeded) {
+    auto viz_query = register_file_->Get<reg::PA_SC_VIZ_QUERY>();
+    if (!(viz_query.viz_query_ena && viz_query.kill_pix_post_hi_z)) {
+      // TODO(Triang3l): Don't drop the draw call completely if the vertex
+      // shader has memexport.
+      // TODO(Triang3l || JoelLinn): Handle this properly in the render
+      // backends.
+      draw_succeeded = IssueDraw(
+          vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
+          is_indexed ? &index_buffer_info : nullptr,
+          xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
+                                     vgt_draw_initiator.prim_type));
+      if (!draw_succeeded) {
+        XELOGE("{}({}, {}, {}): Failed in backend", opcode_name,
+               vgt_draw_initiator.num_indices,
+               uint32_t(vgt_draw_initiator.prim_type),
+               uint32_t(vgt_draw_initiator.source_select));
+      }
+    }
   }
 
-  bool success =
-      IssueDraw(vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
-                is_indexed ? &index_buffer_info : nullptr,
-                xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
-                                           vgt_draw_initiator.prim_type));
-  if (!success) {
-    XELOGE("PM4_DRAW_INDX({}, {}, {}): Failed in backend",
-           vgt_draw_initiator.num_indices,
-           uint32_t(vgt_draw_initiator.prim_type),
-           uint32_t(vgt_draw_initiator.source_select));
-  }
-
+  // If read the packed correctly, but merely couldn't execute it (because of,
+  // for instance, features not supported by the host), don't terminate command
+  // buffer processing as that would leave rendering in a way more inconsistent
+  // state than just a single dropped draw command.
   return true;
+}
+
+bool CommandProcessor::ExecutePacketType3_DRAW_INDX(RingBuffer* reader,
+                                                    uint32_t packet,
+                                                    uint32_t count) {
+  // "initiate fetch of index buffer and draw"
+  // Generally used by Xbox 360 Direct3D 9 for kDMA and kAutoIndex sources.
+  // With a viz query token as the first one.
+  uint32_t count_remaining = count;
+  assert_not_zero(count_remaining);
+  if (!count_remaining) {
+    XELOGE("PM4_DRAW_INDX: Packet too small, can't read the viz query token");
+    return false;
+  }
+  uint32_t viz_query_condition = reader->ReadAndSwap<uint32_t>();
+  --count_remaining;
+  return ExecutePacketType3Draw(reader, packet, "PM4_DRAW_INDX",
+                                viz_query_condition, count_remaining);
 }
 
 bool CommandProcessor::ExecutePacketType3_DRAW_INDX_2(RingBuffer* reader,
                                                       uint32_t packet,
                                                       uint32_t count) {
-  // draw using supplied indices in packet
-  reg::VGT_DRAW_INITIATOR vgt_draw_initiator;
-  vgt_draw_initiator.value = reader->ReadAndSwap<uint32_t>();
-  WriteRegister(XE_GPU_REG_VGT_DRAW_INITIATOR, vgt_draw_initiator.value);
-  assert_true(vgt_draw_initiator.source_select ==
-              xenos::SourceSelect::kAutoIndex);
-  // Index buffer unused as automatic.
-  // uint32_t indices_size =
-  //     vgt_draw_initiator.num_indices *
-  //         (vgt_draw_initiator.index_size == xenos::IndexFormat::kInt32 ? 4
-  //                                                                      : 2);
-  // uint32_t index_ptr = reader->ptr();
-  // TODO(Triang3l): VGT_IMMED_DATA.
-  reader->AdvanceRead((count - 1) * sizeof(uint32_t));
-
-  auto viz_query = register_file_->Get<reg::PA_SC_VIZ_QUERY>();
-  if (viz_query.viz_query_ena && viz_query.kill_pix_post_hi_z) {
-    // TODO(Triang3l): Don't drop the draw call completely if the vertex shader
-    // has memexport.
-    // TODO(Triang3l || JoelLinn): Handle this properly in the render backends.
-    return true;
-  }
-
-  bool success = IssueDraw(
-      vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices, nullptr,
-      xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
-                                 vgt_draw_initiator.prim_type));
-  if (!success) {
-    XELOGE("PM4_DRAW_INDX_IMM({}, {}): Failed in backend",
-           vgt_draw_initiator.num_indices,
-           uint32_t(vgt_draw_initiator.prim_type));
-  }
-
-  return true;
+  // "draw using supplied indices in packet"
+  // Generally used by Xbox 360 Direct3D 9 for kAutoIndex source.
+  // No viz query token.
+  return ExecutePacketType3Draw(reader, packet, "PM4_DRAW_INDX_2", 0, count);
 }
 
 bool CommandProcessor::ExecutePacketType3_SET_CONSTANT(RingBuffer* reader,
@@ -1478,15 +1622,26 @@ bool CommandProcessor::ExecutePacketType3_VIZ_QUERY(RingBuffer* reader,
     // The scan converter writes the internal result back to the register here.
     // We just fake it and say it was visible in case it is read back.
     if (id < 32) {
-      register_file_->values[XE_GPU_REG_PA_SC_VIZ_QUERY_STATUS_0].u32 |=
-          uint32_t(1) << id;
+      register_file_->values[XE_GPU_REG_PA_SC_VIZ_QUERY_STATUS_0] |= uint32_t(1)
+                                                                     << id;
     } else {
-      register_file_->values[XE_GPU_REG_PA_SC_VIZ_QUERY_STATUS_1].u32 |=
+      register_file_->values[XE_GPU_REG_PA_SC_VIZ_QUERY_STATUS_1] |=
           uint32_t(1) << (id - 32);
     }
   }
 
   return true;
+}
+
+void CommandProcessor::InitializeTrace() {
+  // Write the initial register values, to be loaded directly into the
+  // RegisterFile since all registers, including those that may have side
+  // effects on setting, will be saved.
+  trace_writer_.WriteRegisters(0, register_file_->values,
+                               RegisterFile::kRegisterCount, false);
+
+  trace_writer_.WriteGammaRamp(gamma_ramp_256_entry_table(),
+                               gamma_ramp_pwl_rgb(), gamma_ramp_rw_component_);
 }
 
 }  // namespace gpu

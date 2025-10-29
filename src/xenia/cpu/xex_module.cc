@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2021 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -853,9 +853,10 @@ int XexModule::ReadPEHeaders() {
 // offsetof seems to be unable to find OptionalHeader.
 #define offsetof1(type, member) ((std::size_t) & (((type*)0)->member))
 #define IMAGE_FIRST_SECTION1(ntheader)                                   \
-  ((PIMAGE_SECTION_HEADER)(                                              \
-      (uint8_t*)ntheader + offsetof1(IMAGE_NT_HEADERS, OptionalHeader) + \
-      ((PIMAGE_NT_HEADERS)(ntheader))->FileHeader.SizeOfOptionalHeader))
+  ((PIMAGE_SECTION_HEADER)((uint8_t*)ntheader +                          \
+                           offsetof1(IMAGE_NT_HEADERS, OptionalHeader) + \
+                           ((PIMAGE_NT_HEADERS)(ntheader))               \
+                               ->FileHeader.SizeOfOptionalHeader))
 
   // Quick scan to determine bounds of sections.
   size_t upper_address = 0;
@@ -919,9 +920,9 @@ bool XexModule::Load(const std::string_view name, const std::string_view path,
                      const void* xex_addr, size_t xex_length) {
   auto src_header = reinterpret_cast<const xex2_header*>(xex_addr);
 
-  if (src_header->magic == 'XEX1') {
+  if (src_header->magic == kXEX1Signature) {
     xex_format_ = kFormatXex1;
-  } else if (src_header->magic == 'XEX2') {
+  } else if (src_header->magic == kXEX2Signature) {
     xex_format_ = kFormatXex2;
   } else {
     return false;

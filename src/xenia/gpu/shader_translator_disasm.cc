@@ -57,13 +57,13 @@ void DisassembleResultOperand(const InstructionResult& result,
   }
   if (uses_storage_index) {
     switch (result.storage_addressing_mode) {
-      case InstructionStorageAddressingMode::kStatic:
+      case InstructionStorageAddressingMode::kAbsolute:
         out->AppendFormat("{}", result.storage_index);
         break;
-      case InstructionStorageAddressingMode::kAddressAbsolute:
+      case InstructionStorageAddressingMode::kAddressRegisterRelative:
         out->AppendFormat("[{}+a0]", result.storage_index);
         break;
-      case InstructionStorageAddressingMode::kAddressRelative:
+      case InstructionStorageAddressingMode::kLoopRelative:
         out->AppendFormat("[{}+aL]", result.storage_index);
         break;
     }
@@ -109,17 +109,17 @@ void DisassembleSourceOperand(const InstructionOperand& op, StringBuffer* out) {
     out->Append("_abs");
   }
   switch (op.storage_addressing_mode) {
-    case InstructionStorageAddressingMode::kStatic:
+    case InstructionStorageAddressingMode::kAbsolute:
       if (op.is_absolute_value) {
         out->AppendFormat("[{}]", op.storage_index);
       } else {
         out->AppendFormat("{}", op.storage_index);
       }
       break;
-    case InstructionStorageAddressingMode::kAddressAbsolute:
+    case InstructionStorageAddressingMode::kAddressRegisterRelative:
       out->AppendFormat("[{}+a0]", op.storage_index);
       break;
-    case InstructionStorageAddressingMode::kAddressRelative:
+    case InstructionStorageAddressingMode::kLoopRelative:
       out->AppendFormat("[{}+aL]", op.storage_index);
       break;
   }
@@ -141,25 +141,27 @@ void DisassembleSourceOperand(const InstructionOperand& op, StringBuffer* out) {
 void ParsedExecInstruction::Disassemble(StringBuffer* out) const {
   switch (type) {
     case Type::kUnconditional:
-      out->AppendFormat("      {} ", opcode_name);
+      out->AppendFormat("      {}", opcode_name);
       break;
     case Type::kPredicated:
       out->Append(condition ? " (p0) " : "(!p0) ");
-      out->AppendFormat("{} ", opcode_name);
+      out->AppendFormat("{}", opcode_name);
       break;
     case Type::kConditional:
-      out->AppendFormat("      {} ", opcode_name);
-      if (!condition) {
-        out->Append('!');
-      }
-      out->AppendFormat("b{}", bool_constant_index);
+      out->AppendFormat("      {} {}b{}", opcode_name, condition ? "" : "!",
+                        bool_constant_index);
       break;
   }
   if (is_yield) {
-    out->Append(", Yield=true");
+    if (type == Type::kConditional) {
+      // For `exec` or `(p0) exec` (but not `cexec`), "unexpected token ','" if
+      // preceded by a comma.
+      out->Append(',');
+    }
+    out->Append(" Yield=true");
   }
-  if (!clean) {
-    out->Append("  // PredicateClean=false");
+  if (!is_predicate_clean) {
+    out->Append("    // PredicateClean=false");
   }
   out->Append('\n');
 }
@@ -328,13 +330,12 @@ void ParsedVertexFetchInstruction::Disassemble(StringBuffer* out) const {
   if (!is_mini_fetch) {
     out->Append(", ");
     DisassembleSourceOperand(operands[0], out);
-    out->Append(", ");
-    out->AppendFormat("vf{}", 95 - operands[1].storage_index);
+    out->AppendFormat(", vf{}", 95 - operands[1].storage_index);
+    if (attributes.is_index_rounded) {
+      out->Append(", RoundIndex=true");
+    }
   }
 
-  if (attributes.is_index_rounded) {
-    out->Append(", RoundIndex=true");
-  }
   if (attributes.exp_adjust) {
     out->AppendFormat(", ExpAdjust={}", attributes.exp_adjust);
   }

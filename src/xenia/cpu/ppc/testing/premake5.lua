@@ -11,19 +11,22 @@ project("xenia-cpu-ppc-tests")
     "fmt",
     "mspack",
     "xenia-core",
-    "xenia-cpu-backend-x64",
     "xenia-cpu",
     "xenia-base",
   })
   files({
     "ppc_testing_main.cc",
-    "../../../base/main_"..platform_suffix..".cc",
+    "../../../base/console_app_main_"..platform_suffix..".cc",
   })
   files({
     "*.s",
   })
   filter("files:*.s")
     flags({"ExcludeFromBuild"})
+  filter("architecture:x86_64")
+    links({
+      "xenia-cpu-backend-x64",
+    })
   filter("platforms:Windows")
     debugdir(project_root)
     debugargs({
@@ -46,7 +49,7 @@ project("xenia-cpu-ppc-nativetests")
   })
   files({
     "ppc_testing_native_main.cc",
-    "../../../base/main_"..platform_suffix..".cc",
+    "../../../base/console_app_main_"..platform_suffix..".cc",
   })
   files({
     "instr_*.s",

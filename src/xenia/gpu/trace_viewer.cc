@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -10,13 +10,19 @@
 #include "xenia/gpu/trace_viewer.h"
 
 #include <cinttypes>
+#include <string>
 
 #include "third_party/half/include/half.hpp"
 #include "third_party/imgui/imgui.h"
+#include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/memory.h"
+#include "xenia/base/platform.h"
 #include "xenia/base/string.h"
+#include "xenia/base/system.h"
 #include "xenia/base/threading.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -28,10 +34,16 @@
 #include "xenia/memory.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/imgui_drawer.h"
+#include "xenia/ui/immediate_drawer.h"
+#include "xenia/ui/presenter.h"
+#include "xenia/ui/ui_event.h"
+#include "xenia/ui/virtual_key.h"
 #include "xenia/ui/window.h"
+#include "xenia/ui/windowed_app_context.h"
 #include "xenia/xbox.h"
 
-DEFINE_path(target_trace_file, "", "Specifies the trace file to load.", "GPU");
+DEFINE_string(target_trace_file, "", "Specifies the trace file to load.",
+              "GPU");
 
 namespace xe {
 namespace gpu {
@@ -45,24 +57,23 @@ static const ImVec4 kColorComment =
 static const ImVec4 kColorIgnored =
     ImVec4(100 / 255.0f, 100 / 255.0f, 100 / 255.0f, 255 / 255.0f);
 
-TraceViewer::TraceViewer() = default;
+TraceViewer::TraceViewer(xe::ui::WindowedAppContext& app_context,
+                         const std::string_view name)
+    : xe::ui::WindowedApp(app_context, name, "some.trace"),
+      window_listener_(*this) {
+  AddPositionalOption("target_trace_file");
+}
 
 TraceViewer::~TraceViewer() = default;
 
-int TraceViewer::Main(const std::vector<std::string>& args) {
-  // Grab path from the flag or unnamed argument.
-  std::filesystem::path path;
-  if (!cvars::target_trace_file.empty()) {
-    // Passed as a named argument.
-    // TODO(benvanik): find something better than gflags that supports
-    // unicode.
-    path = cvars::target_trace_file;
-  } else if (args.size() >= 2) {
-    // Passed as an unnamed argument.
-    path = xe::to_path(args[1]);
-  }
+bool TraceViewer::OnInitialize() {
+  std::string path = cvars::target_trace_file;
 
   // If no path passed, ask the user.
+  // On Android, however, there's no synchronous file picker, and the trace file
+  // must be picked externally and provided to the trace viewer activity via the
+  // intent.
+#if !XE_PLATFORM_ANDROID
   if (path.empty()) {
     auto file_picker = xe::ui::FilePicker::Create();
     file_picker->set_mode(ui::FilePicker::Mode::kOpen);
@@ -76,55 +87,53 @@ int TraceViewer::Main(const std::vector<std::string>& args) {
     if (file_picker->Show()) {
       auto selected_files = file_picker->selected_files();
       if (!selected_files.empty()) {
-        path = selected_files[0];
+        path = xe::path_to_utf8(selected_files[0]);
       }
     }
   }
+#endif  // !XE_PLATFORM_ANDROID
 
   if (path.empty()) {
-    xe::FatalError("No trace file specified");
-    return 1;
+    xe::ShowSimpleMessageBox(xe::SimpleMessageBoxType::Warning,
+                             "No trace file specified");
+    return false;
   }
-
-  // Normalize the path and make absolute.
-  auto abs_path = std::filesystem::absolute(path);
 
   if (!Setup()) {
-    xe::FatalError("Unable to setup trace viewer");
-    return 1;
+    xe::ShowSimpleMessageBox(xe::SimpleMessageBoxType::Error,
+                             "Unable to setup trace viewer");
+    return false;
   }
-  if (!Load(std::move(abs_path))) {
-    xe::FatalError("Unable to load trace file; not found?");
-    return 1;
+  if (!Load(path)) {
+    xe::ShowSimpleMessageBox(xe::SimpleMessageBoxType::Error,
+                             "Unable to load trace file; not found?");
+    return false;
   }
-  Run();
-  return 0;
+  return true;
 }
 
 bool TraceViewer::Setup() {
+  enum : size_t {
+    kZOrderImGui,
+    kZOrderTraceViewerInput,
+  };
+
   // Main display window.
-  loop_ = ui::Loop::Create();
-  window_ = xe::ui::Window::Create(loop_.get(), "xenia-gpu-trace-viewer");
-  loop_->PostSynchronous([&]() {
-    xe::threading::set_name("Win32 Loop");
-    if (!window_->Initialize()) {
-      xe::FatalError("Failed to initialize main window");
-      return;
-    }
-  });
-  window_->on_closed.AddListener([&](xe::ui::UIEvent* e) {
-    loop_->Quit();
-    XELOGI("User-initiated death!");
-    exit(1);
-  });
-  loop_->on_quit.AddListener([&](xe::ui::UIEvent* e) { window_.reset(); });
-  window_->Resize(1920, 1200);
+  assert_true(app_context().IsInUIThread());
+  window_ = xe::ui::Window::Create(app_context(), "xenia-gpu-trace-viewer",
+                                   1920, 1080);
+  window_->AddListener(&window_listener_);
+  window_->AddInputListener(&window_listener_, kZOrderTraceViewerInput);
+  if (!window_->Open()) {
+    XELOGE("Failed to open the main window");
+    return false;
+  }
 
   // Create the emulator but don't initialize so we can setup the window.
   emulator_ = std::make_unique<Emulator>("", "", "", "");
   X_STATUS result = emulator_->Setup(
-      window_.get(), nullptr, [this]() { return CreateGraphicsSystem(); },
-      nullptr);
+      window_.get(), nullptr, false, nullptr,
+      [this]() { return CreateGraphicsSystem(); }, nullptr);
   if (XFAILED(result)) {
     XELOGE("Failed to setup emulator: {:08X}", result);
     return false;
@@ -132,31 +141,53 @@ bool TraceViewer::Setup() {
   memory_ = emulator_->memory();
   graphics_system_ = emulator_->graphics_system();
 
-  window_->set_imgui_input_enabled(true);
+  player_ = std::make_unique<TracePlayer>(graphics_system_);
 
-  window_->on_key_char.AddListener([&](xe::ui::KeyEvent* e) {
-    if (e->key_code() == 0x74 /* VK_F5 */) {
-      graphics_system_->ClearCaches();
-      e->set_handled(true);
-    }
-  });
-
-  player_ = std::make_unique<TracePlayer>(loop_.get(), graphics_system_);
-
-  window_->on_painting.AddListener([&](xe::ui::UIEvent* e) {
-    DrawUI();
-
-    // Continuous paint.
-    window_->Invalidate();
-  });
-  window_->Invalidate();
+  // Setup drawing to the window.
+  ui::Presenter* presenter = graphics_system_->presenter();
+  if (!presenter) {
+    XELOGE("Failed to initialize the presenter");
+    return false;
+  }
+  xe::ui::GraphicsProvider& graphics_provider = *graphics_system_->provider();
+  immediate_drawer_ = graphics_provider.CreateImmediateDrawer();
+  if (!immediate_drawer_) {
+    XELOGE("Failed to initialize the immediate drawer");
+    return false;
+  }
+  immediate_drawer_->SetPresenter(presenter);
+  imgui_drawer_ =
+      std::make_unique<xe::ui::ImGuiDrawer>(window_.get(), kZOrderImGui);
+  imgui_drawer_->SetPresenterAndImmediateDrawer(presenter,
+                                                immediate_drawer_.get());
+  trace_viewer_dialog_ = std::unique_ptr<TraceViewerDialog>(
+      new TraceViewerDialog(imgui_drawer_.get(), *this));
+  window_->SetPresenter(presenter);
 
   return true;
 }
 
-bool TraceViewer::Load(const std::filesystem::path& trace_file_path) {
-  auto file_name = trace_file_path.filename();
-  window_->set_title("Xenia GPU Trace Viewer: " + xe::path_to_utf8(file_name));
+void TraceViewer::TraceViewerWindowListener::OnClosing(xe::ui::UIEvent& e) {
+  trace_viewer_.app_context().QuitFromUIThread();
+}
+
+void TraceViewer::TraceViewerWindowListener::OnKeyDown(xe::ui::KeyEvent& e) {
+  switch (e.virtual_key()) {
+    case xe::ui::VirtualKey::kF5:
+      trace_viewer_.graphics_system_->ClearCaches();
+      break;
+    default:
+      return;
+  }
+  e.set_handled(true);
+}
+
+void TraceViewer::TraceViewerDialog::OnDraw(ImGuiIO& io) {
+  trace_viewer_.DrawUI();
+}
+
+bool TraceViewer::Load(const std::string_view trace_file_path) {
+  window_->SetTitle("Xenia GPU Trace Viewer: " + std::string(trace_file_path));
 
   if (!player_->Open(trace_file_path)) {
     XELOGE("Could not load trace file");
@@ -164,16 +195,6 @@ bool TraceViewer::Load(const std::filesystem::path& trace_file_path) {
   }
 
   return true;
-}
-
-void TraceViewer::Run() {
-  // Wait until we are exited.
-  loop_->AwaitQuit();
-
-  player_.reset();
-  emulator_.reset();
-  window_.reset();
-  loop_.reset();
 }
 
 void TraceViewer::DrawMultilineString(const std::string_view str) {
@@ -203,6 +224,7 @@ void TraceViewer::DrawUI() {
 void TraceViewer::DrawControllerUI() {
   ImGui::SetNextWindowPos(ImVec2(5, 5), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(340, 60));
+  ImGui::SetNextWindowBgAlpha(kWindowBgAlpha);
   if (!ImGui::Begin("Controller", nullptr)) {
     ImGui::End();
     return;
@@ -240,7 +262,7 @@ void TraceViewer::DrawControllerUI() {
   }
 
   ImGui::SameLine();
-  ImGui::SliderInt("", &target_frame, 0, player_->frame_count() - 1);
+  ImGui::SliderInt("##", &target_frame, 0, player_->frame_count() - 1);
   if (target_frame != player_->current_frame_index() &&
       !player_->is_playing_trace()) {
     player_->SeekFrame(target_frame);
@@ -250,9 +272,11 @@ void TraceViewer::DrawControllerUI() {
 
 void TraceViewer::DrawPacketDisassemblerUI() {
   ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowPos(ImVec2(float(window_->width()) - 500 - 5, 5),
-                          ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowPos(
+      ImVec2(float(window_->GetActualLogicalWidth()) - 500 - 5, 5),
+      ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(500, 300));
+  ImGui::SetNextWindowBgAlpha(kWindowBgAlpha);
   if (!ImGui::Begin("Packet Disassembler", nullptr)) {
     ImGui::End();
     return;
@@ -334,9 +358,10 @@ void TraceViewer::DrawPacketDisassemblerUI() {
                   ImGui::NextColumn();
                   if (!register_info ||
                       register_info->type == RegisterInfo::Type::kDword) {
-                    ImGui::Text("%.8X", action.register_write.value.u32);
+                    ImGui::Text("%.8X", action.register_write.value);
                   } else {
-                    ImGui::Text("%8f", action.register_write.value.f32);
+                    ImGui::Text("%8f", xe::memory::Reinterpret<float>(
+                                           action.register_write.value));
                   }
                   ImGui::Columns(1);
                   break;
@@ -389,6 +414,18 @@ void TraceViewer::DrawPacketDisassemblerUI() {
             break;
           }
         }
+        break;
+      }
+      case TraceCommandType::kRegisters: {
+        auto cmd = reinterpret_cast<const RegistersCommand*>(trace_ptr);
+        trace_ptr += sizeof(*cmd) + cmd->encoded_length;
+        // ImGui::BulletText("Registers");
+        break;
+      }
+      case TraceCommandType::kGammaRamp: {
+        auto cmd = reinterpret_cast<const GammaRampCommand*>(trace_ptr);
+        trace_ptr += sizeof(*cmd) + cmd->encoded_length;
+        // ImGui::BulletText("GammaRamp");
         break;
       }
     }
@@ -460,6 +497,7 @@ int TraceViewer::RecursiveDrawCommandBufferUI(
 void TraceViewer::DrawCommandListUI() {
   ImGui::SetNextWindowPos(ImVec2(5, 70), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(200, 640));
+  ImGui::SetNextWindowBgAlpha(kWindowBgAlpha);
   if (!ImGui::Begin("Command List", nullptr)) {
     ImGui::End();
     return;
@@ -521,7 +559,7 @@ void TraceViewer::DrawCommandListUI() {
   }
 
   ImGui::PushItemWidth(float(column_width - 15));
-  ImGui::SliderInt("", &target_command, -1, command_count - 1);
+  ImGui::SliderInt("##", &target_command, -1, command_count - 1);
   ImGui::PopItemWidth();
 
   if (target_command != player_->current_command_index() &&
@@ -673,10 +711,8 @@ void TraceViewer::DrawTextureInfo(
     const Shader::TextureBinding& texture_binding) {
   auto& regs = *graphics_system_->register_file();
 
-  int r = XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 +
-          texture_binding.fetch_constant * 6;
-  auto group = reinterpret_cast<const xe_gpu_fetch_group_t*>(&regs.values[r]);
-  auto& fetch = group->texture_fetch;
+  xenos::xe_gpu_texture_fetch_t fetch =
+      regs.GetTextureFetch(texture_binding.fetch_constant);
   if (fetch.type != xenos::FetchConstantType::kTexture &&
       (!cvars::gpu_allow_invalid_fetch_constants ||
        fetch.type != xenos::FetchConstantType::kInvalidTexture)) {
@@ -700,8 +736,8 @@ void TraceViewer::DrawTextureInfo(
   ImGui::Columns(2);
   if (texture) {
     ImVec2 button_size(256, 256);
-    if (ImGui::ImageButton(ImTextureID(texture), button_size, ImVec2(0, 0),
-                           ImVec2(1, 1))) {
+    if (ImGui::ImageButton("#texture_info_image", ImTextureID(texture),
+                           button_size, ImVec2(0, 0), ImVec2(1, 1))) {
       // show viewer
     }
   } else {
@@ -744,9 +780,9 @@ void TraceViewer::DrawFailedTextureInfo(
 
 void TraceViewer::DrawVertexFetcher(Shader* shader,
                                     const Shader::VertexBinding& vertex_binding,
-                                    const xe_gpu_vertex_fetch_t* fetch) {
-  const uint8_t* addr = memory_->TranslatePhysical(fetch->address << 2);
-  uint32_t vertex_count = fetch->size / vertex_binding.stride_words;
+                                    const xe_gpu_vertex_fetch_t& fetch) {
+  const uint8_t* addr = memory_->TranslatePhysical(fetch.address << 2);
+  uint32_t vertex_count = fetch.size / vertex_binding.stride_words;
   int column_count = 0;
   for (const auto& attrib : vertex_binding.attributes) {
     switch (attrib.fetch_instr.attributes.data_format) {
@@ -785,8 +821,7 @@ void TraceViewer::DrawVertexFetcher(Shader* shader,
   int display_start, display_end;
   ImGui::CalcListClipping(vertex_count, ImGui::GetTextLineHeight(),
                           &display_start, &display_end);
-  ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
-                       (display_start)*ImGui::GetTextLineHeight());
+  ImGui::Dummy(ImVec2(0, (display_start)*ImGui::GetTextLineHeight()));
   ImGui::Columns(column_count);
   if (display_start <= 1) {
     for (size_t el_index = 0; el_index < vertex_binding.attributes.size();
@@ -848,7 +883,7 @@ void TraceViewer::DrawVertexFetcher(Shader* shader,
 #define LOADEL(type, wo)                                                   \
   GpuSwap(xe::load<type>(vstart +                                          \
                          (attrib.fetch_instr.attributes.offset + wo) * 4), \
-          fetch->endian)
+          fetch.endian)
       switch (attrib.fetch_instr.attributes.data_format) {
         case xenos::VertexFormat::k_32:
           ImGui::Text("%.8X", LOADEL(uint32_t, 0));
@@ -973,8 +1008,8 @@ void TraceViewer::DrawVertexFetcher(Shader* shader,
     }
   }
   ImGui::Columns(1);
-  ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (vertex_count - display_end) *
-                                                    ImGui::GetTextLineHeight());
+  ImGui::Dummy(
+      ImVec2(0, (vertex_count - display_end) * ImGui::GetTextLineHeight()));
   ImGui::PopStyleVar();
   ImGui::EndChild();
 }
@@ -1069,9 +1104,11 @@ void TraceViewer::DrawStateUI() {
   auto command_processor = graphics_system_->command_processor();
   auto& regs = *graphics_system_->register_file();
 
-  ImGui::SetNextWindowPos(ImVec2(float(window_->width()) - 500 - 5, 30),
-                          ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowPos(
+      ImVec2(float(window_->GetActualLogicalWidth()) - 500 - 5, 30),
+      ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(500, 680));
+  ImGui::SetNextWindowBgAlpha(kWindowBgAlpha);
   if (!ImGui::Begin("State", nullptr)) {
     ImGui::End();
     return;
@@ -1150,30 +1187,30 @@ void TraceViewer::DrawStateUI() {
   }
 
   auto enable_mode =
-      static_cast<ModeControl>(regs[XE_GPU_REG_RB_MODECONTROL].u32 & 0x7);
+      static_cast<EdramMode>(regs[XE_GPU_REG_RB_MODECONTROL] & 0x7);
 
   const char* mode_name = "Unknown";
   switch (enable_mode) {
-    case ModeControl::kIgnore:
+    case EdramMode::kNoOperation:
       ImGui::Text("Ignored Command %d", player_->current_command_index());
       break;
-    case ModeControl::kColorDepth:
-    case ModeControl::kDepth: {
+    case EdramMode::kColorDepth:
+    case EdramMode::kDepthOnly: {
       static const char* kPrimNames[] = {
           "<none>",         "point list",   "line list",      "line strip",
           "triangle list",  "triangle fan", "triangle strip", "unknown 0x7",
           "rectangle list", "unknown 0x9",  "unknown 0xA",    "unknown 0xB",
           "line loop",      "quad list",    "quad strip",     "unknown 0xF",
       };
-      ImGui::Text("%s Command %d: %s, %d indices",
-                  enable_mode == ModeControl::kColorDepth ? "Color-Depth"
-                                                          : "Depth-only",
-                  player_->current_command_index(),
-                  kPrimNames[int(draw_info.prim_type)], draw_info.index_count);
+      ImGui::Text(
+          "%s Command %d: %s, %d indices",
+          enable_mode == EdramMode::kColorDepth ? "Color-Depth" : "Depth-only",
+          player_->current_command_index(),
+          kPrimNames[int(draw_info.prim_type)], draw_info.index_count);
       break;
     }
-    case ModeControl::kCopy: {
-      uint32_t copy_dest_base = regs[XE_GPU_REG_RB_COPY_DEST_BASE].u32;
+    case EdramMode::kCopy: {
+      uint32_t copy_dest_base = regs[XE_GPU_REG_RB_COPY_DEST_BASE];
       ImGui::Text("Copy Command %d (to %.8X)", player_->current_command_index(),
                   copy_dest_base);
       break;
@@ -1184,9 +1221,9 @@ void TraceViewer::DrawStateUI() {
   ImGui::BulletText("Viewport State:");
   if (true) {
     ImGui::TreePush((const void*)0);
-    uint32_t pa_su_sc_mode_cntl = regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL].u32;
+    uint32_t pa_su_sc_mode_cntl = regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL];
     if ((pa_su_sc_mode_cntl >> 16) & 1) {
-      uint32_t window_offset = regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET].u32;
+      uint32_t window_offset = regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET];
       int16_t window_offset_x = window_offset & 0x7FFF;
       int16_t window_offset_y = (window_offset >> 16) & 0x7FFF;
       if (window_offset_x & 0x4000) {
@@ -1200,8 +1237,8 @@ void TraceViewer::DrawStateUI() {
     } else {
       ImGui::BulletText("Window Offset: disabled");
     }
-    uint32_t window_scissor_tl = regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL].u32;
-    uint32_t window_scissor_br = regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR].u32;
+    uint32_t window_scissor_tl = regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL];
+    uint32_t window_scissor_br = regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR];
     ImGui::BulletText(
         "Window Scissor: %d,%d to %d,%d (%d x %d)", window_scissor_tl & 0x7FFF,
         (window_scissor_tl >> 16) & 0x7FFF, window_scissor_br & 0x7FFF,
@@ -1209,7 +1246,7 @@ void TraceViewer::DrawStateUI() {
         (window_scissor_br & 0x7FFF) - (window_scissor_tl & 0x7FFF),
         ((window_scissor_br >> 16) & 0x7FFF) -
             ((window_scissor_tl >> 16) & 0x7FFF));
-    uint32_t surface_info = regs[XE_GPU_REG_RB_SURFACE_INFO].u32;
+    uint32_t surface_info = regs[XE_GPU_REG_RB_SURFACE_INFO];
     uint32_t surface_hiz = (surface_info >> 18) & 0x3FFF;
     uint32_t surface_pitch = surface_info & 0x3FFF;
     auto surface_msaa = (surface_info >> 16) & 0x3;
@@ -1221,7 +1258,7 @@ void TraceViewer::DrawStateUI() {
     ImGui::BulletText("Surface Pitch: %d", surface_pitch);
     ImGui::BulletText("Surface HI-Z Pitch: %d", surface_hiz);
     ImGui::BulletText("Surface MSAA: %s", kMsaaNames[surface_msaa]);
-    uint32_t vte_control = regs[XE_GPU_REG_PA_CL_VTE_CNTL].u32;
+    uint32_t vte_control = regs[XE_GPU_REG_PA_CL_VTE_CNTL];
     bool vport_xscale_enable = (vte_control & (1 << 0)) > 0;
     bool vport_xoffset_enable = (vte_control & (1 << 1)) > 0;
     bool vport_yscale_enable = (vte_control & (1 << 2)) > 0;
@@ -1236,14 +1273,20 @@ void TraceViewer::DrawStateUI() {
     }
     ImGui::BulletText(
         "Viewport Offset: %f, %f, %f",
-        vport_xoffset_enable ? regs[XE_GPU_REG_PA_CL_VPORT_XOFFSET].f32 : 0,
-        vport_yoffset_enable ? regs[XE_GPU_REG_PA_CL_VPORT_YOFFSET].f32 : 0,
-        vport_zoffset_enable ? regs[XE_GPU_REG_PA_CL_VPORT_ZOFFSET].f32 : 0);
+        vport_xoffset_enable ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET)
+                             : 0.0f,
+        vport_yoffset_enable ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET)
+                             : 0.0f,
+        vport_zoffset_enable ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZOFFSET)
+                             : 0.0f);
     ImGui::BulletText(
         "Viewport Scale: %f, %f, %f",
-        vport_xscale_enable ? regs[XE_GPU_REG_PA_CL_VPORT_XSCALE].f32 : 1,
-        vport_yscale_enable ? regs[XE_GPU_REG_PA_CL_VPORT_YSCALE].f32 : 1,
-        vport_zscale_enable ? regs[XE_GPU_REG_PA_CL_VPORT_ZSCALE].f32 : 1);
+        vport_xscale_enable ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE)
+                            : 1.0f,
+        vport_yscale_enable ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE)
+                            : 1.0f,
+        vport_zscale_enable ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZSCALE)
+                            : 1.0f);
     if (!vport_xscale_enable) {
       ImGui::PopStyleColor();
     }
@@ -1253,7 +1296,7 @@ void TraceViewer::DrawStateUI() {
                       ((vte_control >> 8) & 0x1) ? "y/w0" : "y",
                       ((vte_control >> 9) & 0x1) ? "z/w0" : "z",
                       ((vte_control >> 10) & 0x1) ? "w0" : "1/w0");
-    uint32_t clip_control = regs[XE_GPU_REG_PA_CL_CLIP_CNTL].u32;
+    uint32_t clip_control = regs[XE_GPU_REG_PA_CL_CLIP_CNTL];
     bool clip_enabled = ((clip_control >> 17) & 0x1) == 0;
     bool dx_clip = ((clip_control >> 20) & 0x1) == 0x1;
     ImGui::BulletText("Clip Enabled: %s, DX Clip: %s",
@@ -1265,11 +1308,9 @@ void TraceViewer::DrawStateUI() {
   ImGui::BulletText("Rasterizer State:");
   if (true) {
     ImGui::TreePush((const void*)0);
-    uint32_t pa_su_sc_mode_cntl = regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL].u32;
-    uint32_t pa_sc_screen_scissor_tl =
-        regs[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL].u32;
-    uint32_t pa_sc_screen_scissor_br =
-        regs[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR].u32;
+    uint32_t pa_su_sc_mode_cntl = regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL];
+    uint32_t pa_sc_screen_scissor_tl = regs[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL];
+    uint32_t pa_sc_screen_scissor_br = regs[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR];
     if (pa_sc_screen_scissor_tl != 0 && pa_sc_screen_scissor_br != 0x20002000) {
       int32_t screen_scissor_x = pa_sc_screen_scissor_tl & 0x7FFF;
       int32_t screen_scissor_y = (pa_sc_screen_scissor_tl >> 16) & 0x7FFF;
@@ -1324,48 +1365,48 @@ void TraceViewer::DrawStateUI() {
   }
   ImGui::Columns(1);
 
-  auto rb_surface_info = regs[XE_GPU_REG_RB_SURFACE_INFO].u32;
+  auto rb_surface_info = regs[XE_GPU_REG_RB_SURFACE_INFO];
   uint32_t surface_pitch = rb_surface_info & 0x3FFF;
   auto surface_msaa =
       static_cast<xenos::MsaaSamples>((rb_surface_info >> 16) & 0x3);
 
   if (ImGui::CollapsingHeader("Color Targets")) {
-    if (enable_mode != ModeControl::kDepth) {
+    if (enable_mode != EdramMode::kDepthOnly) {
       // Alpha testing -- ALPHAREF, ALPHAFUNC, ALPHATESTENABLE
       // if(ALPHATESTENABLE && frag_out.a [<=/ALPHAFUNC] ALPHAREF) discard;
-      uint32_t color_control = regs[XE_GPU_REG_RB_COLORCONTROL].u32;
+      uint32_t color_control = regs[XE_GPU_REG_RB_COLORCONTROL];
       if ((color_control & 0x8) != 0) {
         ImGui::BulletText("Alpha Test: %s %.2f",
                           kCompareFuncNames[color_control & 0x7],
-                          regs[XE_GPU_REG_RB_ALPHA_REF].f32);
+                          regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF));
       } else {
         ImGui::PushStyleColor(ImGuiCol_Text, kColorIgnored);
         ImGui::BulletText("Alpha Test: disabled");
         ImGui::PopStyleColor();
       }
 
-      auto blend_color = ImVec4(regs[XE_GPU_REG_RB_BLEND_RED].f32,
-                                regs[XE_GPU_REG_RB_BLEND_GREEN].f32,
-                                regs[XE_GPU_REG_RB_BLEND_BLUE].f32,
-                                regs[XE_GPU_REG_RB_BLEND_ALPHA].f32);
+      auto blend_color = ImVec4(regs.Get<float>(XE_GPU_REG_RB_BLEND_RED),
+                                regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN),
+                                regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE),
+                                regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA));
       ImGui::BulletText("Blend Color: (%.2f,%.2f,%.2f,%.2f)", blend_color.x,
                         blend_color.y, blend_color.z, blend_color.w);
       ImGui::SameLine();
       // TODO small_height (was true) parameter was removed
       ImGui::ColorButton(nullptr, blend_color);
 
-      uint32_t rb_color_mask = regs[XE_GPU_REG_RB_COLOR_MASK].u32;
+      uint32_t rb_color_mask = regs[XE_GPU_REG_RB_COLOR_MASK];
       uint32_t color_info[4] = {
-          regs[XE_GPU_REG_RB_COLOR_INFO].u32,
-          regs[XE_GPU_REG_RB_COLOR1_INFO].u32,
-          regs[XE_GPU_REG_RB_COLOR2_INFO].u32,
-          regs[XE_GPU_REG_RB_COLOR3_INFO].u32,
+          regs[XE_GPU_REG_RB_COLOR_INFO],
+          regs[XE_GPU_REG_RB_COLOR1_INFO],
+          regs[XE_GPU_REG_RB_COLOR2_INFO],
+          regs[XE_GPU_REG_RB_COLOR3_INFO],
       };
       uint32_t rb_blendcontrol[4] = {
-          regs[XE_GPU_REG_RB_BLENDCONTROL0].u32,
-          regs[XE_GPU_REG_RB_BLENDCONTROL1].u32,
-          regs[XE_GPU_REG_RB_BLENDCONTROL2].u32,
-          regs[XE_GPU_REG_RB_BLENDCONTROL3].u32,
+          regs[XE_GPU_REG_RB_BLENDCONTROL0],
+          regs[XE_GPU_REG_RB_BLENDCONTROL1],
+          regs[XE_GPU_REG_RB_BLENDCONTROL2],
+          regs[XE_GPU_REG_RB_BLENDCONTROL3],
       };
       ImGui::Columns(2);
       for (int i = 0; i < xe::countof(color_info); ++i) {
@@ -1433,19 +1474,21 @@ void TraceViewer::DrawStateUI() {
         ImVec2 button_pos = ImGui::GetCursorScreenPos();
         ImVec2 button_size(256, 256);
         ImTextureID tex = 0;
+        ImGui::PushID(i);
         if (write_mask) {
           auto color_target = GetColorRenderTarget(surface_pitch, surface_msaa,
                                                    color_base, color_format);
           tex = ImTextureID(color_target);
-          if (ImGui::ImageButton(tex, button_size, ImVec2(0, 0),
+          if (ImGui::ImageButton("#color_image", tex, button_size, ImVec2(0, 0),
                                  ImVec2(1, 1))) {
             // show viewer
           }
         } else {
-          ImGui::ImageButton(ImTextureID(0), button_size, ImVec2(0, 0),
-                             ImVec2(1, 1), -1, ImVec4(0, 0, 0, 0),
+          ImGui::ImageButton("#color_image", ImTextureID(0), button_size,
+                             ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0),
                              ImVec4(0, 0, 0, 0));
         }
+        ImGui::PopID();
         if (ImGui::IsItemHovered()) {
           ImGui::BeginTooltip();
           ImGui::Text("Color Target %d (%s), base %.4X, pitch %d, format %s", i,
@@ -1472,9 +1515,9 @@ void TraceViewer::DrawStateUI() {
   }
 
   if (ImGui::CollapsingHeader("Depth/Stencil Target")) {
-    auto rb_depthcontrol = regs[XE_GPU_REG_RB_DEPTHCONTROL].u32;
-    auto rb_stencilrefmask = regs[XE_GPU_REG_RB_STENCILREFMASK].u32;
-    auto rb_depth_info = regs[XE_GPU_REG_RB_DEPTH_INFO].u32;
+    auto rb_depthcontrol = regs[XE_GPU_REG_RB_DEPTHCONTROL];
+    auto rb_stencilrefmask = regs[XE_GPU_REG_RB_STENCILREFMASK];
+    auto rb_depth_info = regs[XE_GPU_REG_RB_DEPTH_INFO];
     bool uses_depth =
         (rb_depthcontrol & 0x00000002) || (rb_depthcontrol & 0x00000004);
     uint32_t stencil_ref = (rb_stencilrefmask & 0xFF);
@@ -1556,8 +1599,8 @@ void TraceViewer::DrawStateUI() {
 
       auto button_pos = ImGui::GetCursorScreenPos();
       ImVec2 button_size(256, 256);
-      ImGui::ImageButton(ImTextureID(depth_target), button_size, ImVec2(0, 0),
-                         ImVec2(1, 1));
+      ImGui::ImageButton("#depth_stencil_image", ImTextureID(depth_target),
+                         button_size, ImVec2(0, 0), ImVec2(1, 1));
       if (ImGui::IsItemHovered()) {
         ImGui::BeginTooltip();
 
@@ -1610,8 +1653,7 @@ void TraceViewer::DrawStateUI() {
       ImGui::CalcListClipping(int(vertices.size() / 4),
                               ImGui::GetTextLineHeight(), &display_start,
                               &display_end);
-      ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
-                           (display_start)*ImGui::GetTextLineHeight());
+      ImGui::Dummy(ImVec2(0, (display_start)*ImGui::GetTextLineHeight()));
 
       ImGui::Columns(int(el_size), "#vsvertices", true);
       for (size_t i = display_start; i < display_end; i++) {
@@ -1632,9 +1674,8 @@ void TraceViewer::DrawStateUI() {
       }
       ImGui::Columns(1);
 
-      ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
-                           ((vertices.size() / 4) - display_end) *
-                               ImGui::GetTextLineHeight());
+      ImGui::Dummy(ImVec2(0, ((vertices.size() / 4) - display_end) *
+                                 ImGui::GetTextLineHeight()));
       ImGui::EndChild();
     } else {
       ImGui::Text("No vertex shader output");
@@ -1660,10 +1701,9 @@ void TraceViewer::DrawStateUI() {
                   draw_info.index_buffer_size,
                   kIndexFormatNames[int(draw_info.index_format)],
                   kEndiannessNames[int(draw_info.index_endianness)]);
-      uint32_t pa_su_sc_mode_cntl = regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL].u32;
+      uint32_t pa_su_sc_mode_cntl = regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL];
       if (pa_su_sc_mode_cntl & (1 << 21)) {
-        uint32_t reset_index =
-            regs[XE_GPU_REG_VGT_MULTI_PRIM_IB_RESET_INDX].u32;
+        uint32_t reset_index = regs[XE_GPU_REG_VGT_MULTI_PRIM_IB_RESET_INDX];
         if (draw_info.index_format == xenos::IndexFormat::kInt16) {
           ImGui::Text("Reset Index: %.4X", reset_index & 0xFFFF);
         } else {
@@ -1678,8 +1718,7 @@ void TraceViewer::DrawStateUI() {
       ImGui::CalcListClipping(1 + draw_info.index_count,
                               ImGui::GetTextLineHeight(), &display_start,
                               &display_end);
-      ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
-                           (display_start)*ImGui::GetTextLineHeight());
+      ImGui::Dummy(ImVec2(0, (display_start)*ImGui::GetTextLineHeight()));
       ImGui::Columns(2, "#indices", true);
       ImGui::SetColumnOffset(1, 60);
       if (display_start <= 1) {
@@ -1714,9 +1753,8 @@ void TraceViewer::DrawStateUI() {
         ImGui::NextColumn();
       }
       ImGui::Columns(1);
-      ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
-                           (draw_info.index_count - display_end) *
-                               ImGui::GetTextLineHeight());
+      ImGui::Dummy(ImVec2(0, (draw_info.index_count - display_end) *
+                                 ImGui::GetTextLineHeight()));
       ImGui::PopStyleVar();
       ImGui::EndChild();
     }
@@ -1725,30 +1763,16 @@ void TraceViewer::DrawStateUI() {
     auto shader = command_processor->active_vertex_shader();
     if (shader) {
       for (const auto& vertex_binding : shader->vertex_bindings()) {
-        int r = XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 +
-                (vertex_binding.fetch_constant / 3) * 6;
-        const auto group =
-            reinterpret_cast<xe_gpu_fetch_group_t*>(&regs.values[r]);
-        const xe_gpu_vertex_fetch_t* fetch = nullptr;
-        switch (vertex_binding.fetch_constant % 3) {
-          case 0:
-            fetch = &group->vertex_fetch_0;
-            break;
-          case 1:
-            fetch = &group->vertex_fetch_1;
-            break;
-          case 2:
-            fetch = &group->vertex_fetch_2;
-            break;
-        }
-        assert_true(fetch->endian == xenos::Endian::k8in32);
+        xe_gpu_vertex_fetch_t fetch =
+            regs.GetVertexFetch(vertex_binding.fetch_constant);
+        assert_true(fetch.endian == xenos::Endian::k8in32);
         char tree_root_id[32];
         sprintf(tree_root_id, "#vertices_root_%d",
                 vertex_binding.fetch_constant);
         if (ImGui::TreeNode(tree_root_id, "vf%d: 0x%.8X (%db), %s",
-                            vertex_binding.fetch_constant, fetch->address << 2,
-                            fetch->size * 4,
-                            kEndiannessNames[int(fetch->endian)])) {
+                            vertex_binding.fetch_constant, fetch.address << 2,
+                            fetch.size * 4,
+                            kEndiannessNames[int(fetch.endian)])) {
           ImGui::BeginChild("#vertices", ImVec2(0, 300));
           DrawVertexFetcher(shader, vertex_binding, fetch);
           ImGui::EndChild();
@@ -1796,7 +1820,7 @@ void TraceViewer::DrawStateUI() {
       ImGui::Text("f%02d_%d", (i - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) / 6,
                   (i - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) % 6);
       ImGui::NextColumn();
-      ImGui::Text("%.8X", regs[i].u32);
+      ImGui::Text("%.8X", regs[i]);
       ImGui::NextColumn();
     }
     ImGui::Columns(1);
@@ -1807,8 +1831,9 @@ void TraceViewer::DrawStateUI() {
          i <= XE_GPU_REG_SHADER_CONSTANT_511_X; i += 4) {
       ImGui::Text("c%d", (i - XE_GPU_REG_SHADER_CONSTANT_000_X) / 4);
       ImGui::NextColumn();
-      ImGui::Text("%f, %f, %f, %f", regs[i + 0].f32, regs[i + 1].f32,
-                  regs[i + 2].f32, regs[i + 3].f32);
+      ImGui::Text("%f, %f, %f, %f", regs.Get<float>(i + 0),
+                  regs.Get<float>(i + 1), regs.Get<float>(i + 2),
+                  regs.Get<float>(i + 3));
       ImGui::NextColumn();
     }
     ImGui::Columns(1);
@@ -1821,7 +1846,7 @@ void TraceViewer::DrawStateUI() {
                   (i - XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031) * 32,
                   (i - XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031) * 32 + 31);
       ImGui::NextColumn();
-      ImGui::Text("%.8X", regs[i].u32);
+      ImGui::Text("%.8X", regs[i]);
       ImGui::NextColumn();
     }
     ImGui::Columns(1);
@@ -1832,7 +1857,7 @@ void TraceViewer::DrawStateUI() {
          i <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31; ++i) {
       ImGui::Text("l%d", i - XE_GPU_REG_SHADER_CONSTANT_LOOP_00);
       ImGui::NextColumn();
-      ImGui::Text("%.8X", regs[i].u32);
+      ImGui::Text("%.8X", regs[i]);
       ImGui::NextColumn();
     }
     ImGui::Columns(1);

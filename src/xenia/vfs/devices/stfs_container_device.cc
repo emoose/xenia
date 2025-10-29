@@ -19,20 +19,16 @@
 #include "xenia/base/math.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/vfs/devices/stfs_xbox.h"
 #include "xenia/vfs/devices/stfs_container_entry.h"
-
-#if XE_PLATFORM_WIN32
-#include "xenia/base/platform_win.h"
-#define timegm _mkgmtime
-#endif
 
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
 // xboxkrnl_xekeys.cc
-dword_result_t XeKeysConsolePrivateKeySign(
+dword_result_t XeKeysConsolePrivateKeySign_entry(
     lpvoid_t hash, pointer_t<X_XE_CONSOLE_SIGNATURE> output_cert_sig);
-dword_result_t XeKeysGetConsoleID(lpvoid_t raw_bytes, lpvoid_t hex_string);
+dword_result_t XeKeysGetConsoleID_entry(lpvoid_t raw_bytes, lpvoid_t hex_string);
 }  // namespace xboxkrnl
 }  // namespace kernel
 
@@ -40,25 +36,6 @@ namespace vfs {
 
 DEFINE_string(device_id, "0000000000000000000000000000000000000000",
               "Device ID to use for STFS/save packages", "Content");
-
-// Convert FAT timestamp to 100-nanosecond intervals since January 1, 1601 (UTC)
-uint64_t decode_fat_timestamp(uint32_t date, uint32_t time) {
-  struct tm tm = {0};
-  // 80 is the difference between 1980 (FAT) and 1900 (tm);
-  tm.tm_year = ((0xFE00 & date) >> 9) + 80;
-  tm.tm_mon = (0x01E0 & date) >> 5;
-  tm.tm_mday = (0x001F & date) >> 0;
-  tm.tm_hour = (0xF800 & time) >> 11;
-  tm.tm_min = (0x07E0 & time) >> 5;
-  tm.tm_sec = (0x001F & time) << 1;  // the value stored in 2-seconds intervals
-  tm.tm_isdst = 0;
-  time_t timet = timegm(&tm);
-  if (timet == -1) {
-    return 0;
-  }
-  // 11644473600LL is a difference between 1970 and 1601
-  return (timet + 11644473600LL) * 10000000;
-}
 
 std::tuple<uint32_t, uint32_t> encode_fat_timestamp(uint64_t timestamp) {
   time_t time_ = (timestamp / 10000000) - 11644473600LL;
@@ -703,7 +680,7 @@ bool StfsContainerDevice::STFSFlush() {
 
   // Update misc metadata
 
-  kernel::xboxkrnl::XeKeysGetConsoleID(header_.metadata.console_id, nullptr);
+  kernel::xboxkrnl::XeKeysGetConsoleID_entry(header_.metadata.console_id, nullptr);
 
   header_.metadata.profile_id = kernel::kernel_state()->user_profile()->xuid();
 
@@ -891,7 +868,7 @@ bool StfsContainerDevice::STFSFlush() {
   XELOGD(" - Profile ID:     {:016X}", header_.metadata.profile_id);
   XELOGD(" - Device ID:      {}", device_id.to_string());
 
-  xe::kernel::xboxkrnl::XeKeysConsolePrivateKeySign(
+  xe::kernel::xboxkrnl::XeKeysConsolePrivateKeySign_entry(
       header_hash, &header_.header.signature.console);
 
   xe::filesystem::Seek(package_file, 0, SEEK_SET);

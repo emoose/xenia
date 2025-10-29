@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2015 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -16,7 +16,6 @@
 #include "xenia/base/threading.h"
 #include "xenia/gpu/trace_protocol.h"
 #include "xenia/gpu/trace_reader.h"
-#include "xenia/ui/loop.h"
 
 namespace xe {
 namespace gpu {
@@ -30,8 +29,7 @@ enum class TracePlaybackMode {
 
 class TracePlayer : public TraceReader {
  public:
-  TracePlayer(xe::ui::Loop* loop, GraphicsSystem* graphics_system);
-  ~TracePlayer() override;
+  TracePlayer(GraphicsSystem* graphics_system);
 
   GraphicsSystem* graphics_system() const { return graphics_system_; }
   int current_frame_index() const { return current_frame_index_; }
@@ -54,14 +52,12 @@ class TracePlayer : public TraceReader {
   void PlayTraceOnThread(const uint8_t* trace_data, size_t trace_size,
                          TracePlaybackMode playback_mode, bool clear_caches);
 
-  xe::ui::Loop* loop_;
   GraphicsSystem* graphics_system_;
   int current_frame_index_;
   int current_command_index_;
   bool playing_trace_ = false;
   std::atomic<uint32_t> playback_percent_ = {0};
   std::unique_ptr<xe::threading::Event> playback_event_;
-  uint8_t* edram_snapshot_ = nullptr;
 };
 
 }  // namespace gpu

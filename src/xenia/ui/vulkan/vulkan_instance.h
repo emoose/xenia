@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2014 Ben Vanik. All rights reserved.                             *
+ * Copyright 2025 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -11,91 +11,131 @@
 #define XENIA_UI_VULKAN_VULKAN_INSTANCE_H_
 
 #include <memory>
-#include <string>
 #include <vector>
 
-#include "xenia/ui/vulkan/vulkan.h"
-#include "xenia/ui/vulkan/vulkan_util.h"
-#include "xenia/ui/window.h"
+#include "xenia/base/platform.h"
+#include "xenia/ui/renderdoc_api.h"
+#include "xenia/ui/vulkan/vulkan_api.h"
+
+#if XE_PLATFORM_WIN32
+#include "xenia/base/platform_win.h"
+#endif
 
 namespace xe {
 namespace ui {
 namespace vulkan {
 
-// Wrappers and utilities for VkInstance.
 class VulkanInstance {
  public:
-  VulkanInstance();
+  static std::unique_ptr<VulkanInstance> Create(bool with_surface,
+                                                bool try_enable_validation);
+
+  VulkanInstance(const VulkanInstance&) = delete;
+  VulkanInstance& operator=(const VulkanInstance&) = delete;
+  VulkanInstance(VulkanInstance&&) = delete;
+  VulkanInstance& operator=(VulkanInstance&&) = delete;
+
   ~VulkanInstance();
 
-  VkInstance handle = nullptr;
+  // nullptr if RenderDoc is not connected.
+  RenderDocAPI* renderdoc_api() const { return renderdoc_api_.get(); }
 
-  operator VkInstance() const { return handle; }
+  struct Functions {
+    // From the loader module.
+    PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr = nullptr;
+    PFN_vkDestroyInstance vkDestroyInstance = nullptr;
 
-  // Declares a layer to verify and enable upon initialization.
-  // Must be called before Initialize.
-  void DeclareRequiredLayer(std::string name, uint32_t min_version,
-                            bool is_optional) {
-    required_layers_.push_back({name, min_version, is_optional});
-  }
+    // From vkGetInstanceProcAddr for nullptr.
+    PFN_vkCreateInstance vkCreateInstance = nullptr;
+    PFN_vkEnumerateInstanceExtensionProperties
+        vkEnumerateInstanceExtensionProperties = nullptr;
+    PFN_vkEnumerateInstanceLayerProperties vkEnumerateInstanceLayerProperties =
+        nullptr;
+    // Vulkan 1.1.
+    PFN_vkEnumerateInstanceVersion vkEnumerateInstanceVersion = nullptr;
 
-  // Declares an extension to verify and enable upon initialization.
-  // Must be called before Initialize.
-  void DeclareRequiredExtension(std::string name, uint32_t min_version,
-                                bool is_optional) {
-    required_extensions_.push_back({name, min_version, is_optional});
-  }
+    // From vkGetInstanceProcAddr for the instance.
+#define XE_UI_VULKAN_FUNCTION(name) PFN_##name name = nullptr;
+#define XE_UI_VULKAN_FUNCTION_PROMOTED(extension_name, core_name) \
+  PFN_##core_name core_name = nullptr;
+#include "xenia/ui/vulkan/functions/instance_1_0.inc"
+    // VK_KHR_surface (#1)
+#include "xenia/ui/vulkan/functions/instance_khr_surface.inc"
+    // VK_KHR_xcb_surface (#6)
+#ifdef VK_USE_PLATFORM_XCB_KHR
+#include "xenia/ui/vulkan/functions/instance_khr_xcb_surface.inc"
+#endif
+    // VK_KHR_android_surface (#9)
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
+#include "xenia/ui/vulkan/functions/instance_khr_android_surface.inc"
+#endif
+    // VK_KHR_win32_surface (#10)
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+#include "xenia/ui/vulkan/functions/instance_khr_win32_surface.inc"
+#endif
+    // VK_KHR_get_physical_device_properties2 (#60, promoted to 1.1)
+#include "xenia/ui/vulkan/functions/instance_1_1_khr_get_physical_device_properties2.inc"
+    // VK_EXT_debug_utils (#129)
+#include "xenia/ui/vulkan/functions/instance_ext_debug_utils.inc"
+#undef XE_UI_VULKAN_FUNCTION_PROMOTED
+#undef XE_UI_VULKAN_FUNCTION
+  };
 
-  // Initializes the instance, querying and enabling extensions and layers and
-  // preparing the instance for general use.
-  // If initialization succeeds it's likely that no more failures beyond runtime
-  // issues will occur.
-  bool Initialize();
+  const Functions& functions() const { return functions_; }
 
-  // Returns a list of all available devices as detected during initialization.
-  const std::vector<DeviceInfo>& available_devices() const {
-    return available_devices_;
-  }
+  uint32_t api_version() const { return api_version_; }
 
-  // True if RenderDoc is attached and available for use.
-  bool is_renderdoc_attached() const { return is_renderdoc_attached_; }
-  // RenderDoc API handle, if attached.
-  void* renderdoc_api() const { return renderdoc_api_; }
+  // Also set to true if the version of the Vulkan API they were promoted to it
+  // supported (with the `ext_major_minor_` prefix rather than `ext_`).
+  struct Extensions {
+    bool ext_KHR_surface = false;  // #1
+#ifdef VK_USE_PLATFORM_XCB_KHR
+    bool ext_KHR_xcb_surface = false;  // #6
+#endif
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
+    bool ext_KHR_android_surface = false;  // #9
+#endif
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+    bool ext_KHR_win32_surface = false;  // #10
+#endif
+    bool ext_1_1_KHR_get_physical_device_properties2 = false;  // #60
+    bool ext_EXT_debug_utils = false;                          // #129
+    bool ext_KHR_portability_enumeration = false;              // #395
+  };
+
+  const Extensions& extensions() const { return extensions_; }
+
+  VkInstance instance() const { return instance_; }
+
+  void EnumeratePhysicalDevices(
+      std::vector<VkPhysicalDevice>& physical_devices_out) const;
 
  private:
-  // Attempts to enable RenderDoc via the API, if it is attached.
-  bool EnableRenderDoc();
+  explicit VulkanInstance() = default;
 
-  // Queries the system to find global extensions and layers.
-  bool QueryGlobals();
+  std::unique_ptr<RenderDocAPI> renderdoc_api_;
 
-  // Creates the instance, enabling required extensions and layers.
-  bool CreateInstance();
-  void DestroyInstance();
+#if XE_PLATFORM_LINUX
+  void* loader_ = nullptr;
+#elif XE_PLATFORM_WIN32
+  HMODULE loader_ = nullptr;
+#endif
 
-  // Enables debugging info and callbacks for supported layers.
-  void EnableDebugValidation();
-  void DisableDebugValidation();
+  Functions functions_;
 
-  // Queries all available physical devices.
-  bool QueryDevices();
+  uint32_t api_version_ = VK_MAKE_API_VERSION(0, 1, 0, 0);
 
-  void DumpLayers(const std::vector<LayerInfo>& layers, const char* indent);
-  void DumpExtensions(const std::vector<VkExtensionProperties>& extensions,
-                      const char* indent);
-  void DumpDeviceInfo(const DeviceInfo& device_info);
+  Extensions extensions_;
 
-  std::vector<Requirement> required_layers_;
-  std::vector<Requirement> required_extensions_;
+  VkInstance instance_ = nullptr;
 
-  std::vector<LayerInfo> global_layers_;
-  std::vector<VkExtensionProperties> global_extensions_;
-  std::vector<DeviceInfo> available_devices_;
+  static VkBool32 DebugUtilsMessengerCallback(
+      VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
+      VkDebugUtilsMessageTypeFlagsEXT message_types,
+      const VkDebugUtilsMessengerCallbackDataEXT* callback_data,
+      void* user_data);
 
-  VkDebugReportCallbackEXT dbg_report_callback_ = nullptr;
-
-  void* renderdoc_api_ = nullptr;
-  bool is_renderdoc_attached_ = false;
+  VkDebugUtilsMessengerEXT debug_utils_messenger_ = VK_NULL_HANDLE;
 };
 
 }  // namespace vulkan

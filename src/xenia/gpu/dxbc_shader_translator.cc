@@ -23,11 +23,12 @@
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/graphics_provider.h"
 
+// The test case for AMD is 4D5307E6 (checked in 2018).
 DEFINE_bool(dxbc_switch, true,
             "Use switch rather than if for flow control. Turning this off or "
             "on may improve stability, though this heavily depends on the "
             "driver - on AMD, it's recommended to have this set to true, as "
-            "Halo 3 appears to crash when if is used for flow control "
+            "some titles appear to crash when if is used for flow control "
             "(possibly the shader compiler tries to flatten them). On Intel "
             "HD Graphics, this is ignored because of a crash with the switch "
             "instruction.",
@@ -68,8 +69,8 @@ using namespace ucode;
 DxbcShaderTranslator::DxbcShaderTranslator(
     ui::GraphicsProvider::GpuVendorID vendor_id, bool bindless_resources_used,
     bool edram_rov_used, bool gamma_render_target_as_srgb,
-    bool msaa_2x_supported, uint32_t draw_resolution_scale,
-    bool force_emit_source_map)
+    bool msaa_2x_supported, uint32_t draw_resolution_scale_x,
+    uint32_t draw_resolution_scale_y, bool force_emit_source_map)
     : a_(shader_code_, statistics_),
       ao_(shader_object_, statistics_),
       vendor_id_(vendor_id),
@@ -77,10 +78,11 @@ DxbcShaderTranslator::DxbcShaderTranslator(
       edram_rov_used_(edram_rov_used),
       gamma_render_target_as_srgb_(gamma_render_target_as_srgb),
       msaa_2x_supported_(msaa_2x_supported),
-      draw_resolution_scale_(draw_resolution_scale),
+      draw_resolution_scale_x_(draw_resolution_scale_x),
+      draw_resolution_scale_y_(draw_resolution_scale_y),
       emit_source_map_(force_emit_source_map || cvars::dxbc_source_map) {
-  assert_true(draw_resolution_scale >= 1);
-  assert_true(draw_resolution_scale <= 3);
+  assert_not_zero(draw_resolution_scale_x);
+  assert_not_zero(draw_resolution_scale_y);
   // Don't allocate again and again for the first shader.
   shader_code_.reserve(8192);
   shader_object_.reserve(16384);
@@ -106,6 +108,8 @@ uint64_t DxbcShaderTranslator::GetDefaultVertexShaderModification(
   shader_modification.vertex.dynamic_addressable_register_count =
       dynamic_addressable_register_count;
   shader_modification.vertex.host_vertex_shader_type = host_vertex_shader_type;
+  shader_modification.vertex.interpolator_mask =
+      (UINT32_C(1) << xenos::kMaxInterpolators) - 1;
   return shader_modification.value;
 }
 
@@ -114,6 +118,8 @@ uint64_t DxbcShaderTranslator::GetDefaultPixelShaderModification(
   Modification shader_modification;
   shader_modification.pixel.dynamic_addressable_register_count =
       dynamic_addressable_register_count;
+  shader_modification.pixel.interpolator_mask =
+      (UINT32_C(1) << xenos::kMaxInterpolators) - 1;
   shader_modification.pixel.depth_stencil_mode =
       Modification::DepthStencilMode::kNoModifiers;
   return shader_modification.value;
@@ -134,8 +140,16 @@ void DxbcShaderTranslator::Reset() {
 
   system_constants_used_ = 0;
 
+  out_reg_vs_interpolators_ = UINT32_MAX;
+  out_reg_vs_position_ = UINT32_MAX;
+  out_reg_vs_clip_cull_distances_ = UINT32_MAX;
+  out_reg_vs_point_size_ = UINT32_MAX;
+  in_reg_ps_interpolators_ = UINT32_MAX;
+  in_reg_ps_point_coordinates_ = UINT32_MAX;
+  in_reg_ps_position_ = UINT32_MAX;
+  in_reg_ps_front_face_sample_index_ = UINT32_MAX;
+
   in_domain_location_used_ = 0;
-  in_primitive_id_used_ = false;
   in_control_point_index_used_ = false;
   in_position_used_ = 0;
   in_front_face_used_ = false;
@@ -162,8 +176,6 @@ void DxbcShaderTranslator::Reset() {
   uav_index_edram_ = kBindingIndexUnallocated;
 
   sampler_bindings_.clear();
-
-  memexport_alloc_current_count_ = 0;
 
   std::memset(&shader_feature_info_, 0, sizeof(shader_feature_info_));
   std::memset(&statistics_, 0, sizeof(statistics_));
@@ -210,63 +222,154 @@ void DxbcShaderTranslator::PopSystemTemp(uint32_t count) {
   system_temp_count_current_ -= std::min(count, system_temp_count_current_);
 }
 
-void DxbcShaderTranslator::ConvertPWLGamma(
-    bool to_gamma, int32_t source_temp, uint32_t source_temp_component,
-    uint32_t target_temp, uint32_t target_temp_component, uint32_t piece_temp,
-    uint32_t piece_temp_component, uint32_t accumulator_temp,
-    uint32_t accumulator_temp_component) {
-  assert_true(source_temp != target_temp ||
-              source_temp_component != target_temp_component ||
-              ((target_temp != accumulator_temp ||
-                target_temp_component != accumulator_temp_component) &&
-               (target_temp != piece_temp ||
-                target_temp_component != piece_temp_component)));
-  assert_true(piece_temp != source_temp ||
-              piece_temp_component != source_temp_component);
-  assert_true(accumulator_temp != source_temp ||
-              accumulator_temp_component != source_temp_component);
-  assert_true(piece_temp != accumulator_temp ||
-              piece_temp_component != accumulator_temp_component);
+void DxbcShaderTranslator::PWLGammaToLinear(
+    uint32_t target_temp, uint32_t target_temp_component, uint32_t source_temp,
+    uint32_t source_temp_component, bool source_pre_saturated, uint32_t temp1,
+    uint32_t temp1_component, uint32_t temp2, uint32_t temp2_component) {
+  // The source is needed only once to begin building the result, so it can be
+  // the same as the destination.
+  assert_true(temp1 != target_temp || temp1_component != target_temp_component);
+  assert_true(temp1 != source_temp || temp1_component != source_temp_component);
+  assert_true(temp2 != target_temp || temp2_component != target_temp_component);
+  assert_true(temp2 != source_temp || temp2_component != source_temp_component);
+  assert_true(temp1 != temp2 || temp1_component != temp2_component);
+  dxbc::Dest target_dest(
+      dxbc::Dest::R(target_temp, UINT32_C(1) << target_temp_component));
+  dxbc::Src target_src(dxbc::Src::R(target_temp).Select(target_temp_component));
   dxbc::Src source_src(dxbc::Src::R(source_temp).Select(source_temp_component));
-  dxbc::Dest piece_dest(dxbc::Dest::R(piece_temp, 1 << piece_temp_component));
-  dxbc::Src piece_src(dxbc::Src::R(piece_temp).Select(piece_temp_component));
-  dxbc::Dest accumulator_dest(
-      dxbc::Dest::R(accumulator_temp, 1 << accumulator_temp_component));
-  dxbc::Src accumulator_src(
-      dxbc::Src::R(accumulator_temp).Select(accumulator_temp_component));
-  // For each piece:
-  // 1) Calculate how far we are on it. Multiply by 1/width, subtract
-  //    start/width and saturate.
-  // 2) Add the contribution of the piece - multiply the position on the piece
-  //    by its slope*width and accumulate.
-  // Piece 1.
-  a_.OpMul(piece_dest, source_src,
-           dxbc::Src::LF(to_gamma ? (1.0f / 0.0625f) : (1.0f / 0.25f)), true);
-  a_.OpMul(accumulator_dest, piece_src,
-           dxbc::Src::LF(to_gamma ? (4.0f * 0.0625f) : (0.25f * 0.25f)));
-  // Piece 2.
-  a_.OpMAd(piece_dest, source_src,
-           dxbc::Src::LF(to_gamma ? (1.0f / 0.0625f) : (1.0f / 0.125f)),
-           dxbc::Src::LF(to_gamma ? (-0.0625f / 0.0625f) : (-0.25f / 0.125f)),
-           true);
-  a_.OpMAd(accumulator_dest, piece_src,
-           dxbc::Src::LF(to_gamma ? (2.0f * 0.0625f) : (0.5f * 0.125f)),
-           accumulator_src);
-  // Piece 3.
-  a_.OpMAd(piece_dest, source_src,
-           dxbc::Src::LF(to_gamma ? (1.0f / 0.375f) : (1.0f / 0.375f)),
-           dxbc::Src::LF(to_gamma ? (-0.125f / 0.375f) : (-0.375f / 0.375f)),
-           true);
-  a_.OpMAd(accumulator_dest, piece_src,
-           dxbc::Src::LF(to_gamma ? (1.0f * 0.375f) : (1.0f * 0.375f)),
-           accumulator_src);
-  // Piece 4.
-  a_.OpMAd(piece_dest, source_src,
-           dxbc::Src::LF(to_gamma ? (1.0f / 0.5f) : (1.0f / 0.25f)),
-           dxbc::Src::LF(to_gamma ? (-0.5f / 0.5f) : (-0.75f / 0.25f)), true);
-  a_.OpMAd(dxbc::Dest::R(target_temp, 1 << target_temp_component), piece_src,
-           dxbc::Src::LF(to_gamma ? (0.5f * 0.5f) : (2.0f * 0.25f)),
-           accumulator_src);
+  dxbc::Dest temp1_dest(dxbc::Dest::R(temp1, UINT32_C(1) << temp1_component));
+  dxbc::Src temp1_src(dxbc::Src::R(temp1).Select(temp1_component));
+  dxbc::Dest temp2_dest(dxbc::Dest::R(temp2, UINT32_C(1) << temp2_component));
+  dxbc::Src temp2_src(dxbc::Src::R(temp2).Select(temp2_component));
+
+  // Get the scale (into temp1) and the offset (into temp2) for the piece.
+  // Using `source >= threshold` comparisons because the input might have not
+  // been saturated yet, and thus it may be NaN - since it will be saturated to
+  // 0 later, the 0...64/255 case should be selected for it.
+  a_.OpGE(temp2_dest, source_src, dxbc::Src::LF(96.0f / 255.0f));
+  a_.OpIf(true, temp2_src);
+  // [96/255 ... 1
+  a_.OpGE(temp2_dest, source_src, dxbc::Src::LF(192.0f / 255.0f));
+  a_.OpMovC(temp1_dest, temp2_src, dxbc::Src::LF(8.0f / 1024.0f),
+            dxbc::Src::LF(4.0f / 1024.0f));
+  a_.OpMovC(temp2_dest, temp2_src, dxbc::Src::LF(-1024.0f),
+            dxbc::Src::LF(-256.0f));
+  a_.OpElse();
+  // 0 ... 96/255)
+  a_.OpGE(temp2_dest, source_src, dxbc::Src::LF(64.0f / 255.0f));
+  a_.OpMovC(temp1_dest, temp2_src, dxbc::Src::LF(2.0f / 1024.0f),
+            dxbc::Src::LF(1.0f / 1024.0f));
+  a_.OpMovC(temp2_dest, temp2_src, dxbc::Src::LF(-64.0f), dxbc::Src::LF(0.0f));
+  a_.OpEndIf();
+
+  if (!source_pre_saturated) {
+    // Saturate the input, and flush NaN to 0.
+    a_.OpMov(target_dest, source_src, true);
+  }
+  // linear = gamma * (255 * 1024) * scale + offset
+  // As both 1024 and the scale are powers of 2, and 1024 * scale is not smaller
+  // than 1, it's not important if it's (gamma * 255) * 1024 * scale,
+  // (gamma * 255 * 1024) * scale, gamma * 255 * (1024 * scale), or
+  // gamma * (255 * 1024 * scale) - or the option chosen here, as long as
+  // 1024 is applied before the scale since the scale is < 1 (specifically at
+  // least 1/1024), and it may make very small values denormal.
+  a_.OpMul(target_dest, source_pre_saturated ? source_src : target_src,
+           dxbc::Src::LF(255.0f * 1024.0f));
+  a_.OpMAd(target_dest, target_src, temp1_src, temp2_src);
+  // linear += trunc(linear * scale)
+  a_.OpMul(temp1_dest, target_src, temp1_src);
+  a_.OpRoundZ(temp1_dest, temp1_src);
+  a_.OpAdd(target_dest, target_src, temp1_src);
+  // linear *= 1/1023
+  a_.OpMul(target_dest, target_src, dxbc::Src::LF(1.0f / 1023.0f));
+}
+
+void DxbcShaderTranslator::PreSaturatedLinearToPWLGamma(
+    uint32_t target_temp, uint32_t target_temp_component, uint32_t source_temp,
+    uint32_t source_temp_component, uint32_t temp_or_target,
+    uint32_t temp_or_target_component, uint32_t temp_non_target,
+    uint32_t temp_non_target_component) {
+  // The source may be the same as the target, but in this case it can't also be
+  // used as a temporary variable.
+  assert_true(target_temp != source_temp ||
+              target_temp_component != source_temp_component ||
+              target_temp != temp_or_target ||
+              target_temp_component != temp_or_target_component);
+  assert_true(temp_or_target != source_temp ||
+              temp_or_target_component != source_temp_component);
+  assert_true(temp_non_target != target_temp ||
+              temp_non_target_component != target_temp_component);
+  assert_true(temp_non_target != source_temp ||
+              temp_non_target_component != source_temp_component);
+  assert_true(temp_or_target != temp_non_target ||
+              temp_or_target_component != temp_non_target_component);
+  dxbc::Dest target_dest(
+      dxbc::Dest::R(target_temp, UINT32_C(1) << target_temp_component));
+  dxbc::Src target_src(dxbc::Src::R(target_temp).Select(target_temp_component));
+  dxbc::Src source_src(dxbc::Src::R(source_temp).Select(source_temp_component));
+  dxbc::Dest temp_or_target_dest(
+      dxbc::Dest::R(temp_or_target, UINT32_C(1) << temp_or_target_component));
+  dxbc::Src temp_or_target_src(
+      dxbc::Src::R(temp_or_target).Select(temp_or_target_component));
+  dxbc::Dest temp_non_target_dest(
+      dxbc::Dest::R(temp_non_target, UINT32_C(1) << temp_non_target_component));
+  dxbc::Src temp_non_target_src(
+      dxbc::Src::R(temp_non_target).Select(temp_non_target_component));
+
+  // Get the scale (into temp_or_target) and the offset (into temp_non_target)
+  // for the piece.
+  a_.OpGE(temp_non_target_dest, source_src, dxbc::Src::LF(128.0f / 1023.0f));
+  a_.OpIf(true, temp_non_target_src);
+  // [128/1023 ... 1
+  a_.OpGE(temp_non_target_dest, source_src, dxbc::Src::LF(512.0f / 1023.0f));
+  a_.OpMovC(temp_or_target_dest, temp_non_target_src,
+            dxbc::Src::LF(1023.0f / 8.0f), dxbc::Src::LF(1023.0f / 4.0f));
+  a_.OpMovC(temp_non_target_dest, temp_non_target_src,
+            dxbc::Src::LF(128.0f / 255.0f), dxbc::Src::LF(64.0f / 255.0f));
+  a_.OpElse();
+  // 0 ... 128/1023)
+  a_.OpGE(temp_non_target_dest, source_src, dxbc::Src::LF(64.0f / 1023.0f));
+  a_.OpMovC(temp_or_target_dest, temp_non_target_src,
+            dxbc::Src::LF(1023.0f / 2.0f), dxbc::Src::LF(1023.0f));
+  a_.OpMovC(temp_non_target_dest, temp_non_target_src,
+            dxbc::Src::LF(32.0f / 255.0f), dxbc::Src::LF(0.0f));
+  a_.OpEndIf();
+
+  // gamma = trunc(linear * scale) * (1.0 / 255.0) + offset
+  a_.OpMul(target_dest, source_src, temp_or_target_src);
+  a_.OpRoundZ(target_dest, target_src);
+  a_.OpMAd(target_dest, target_src, dxbc::Src::LF(1.0f / 255.0f),
+           temp_non_target_src);
+}
+
+void DxbcShaderTranslator::RemapAndConvertVertexIndices(
+    uint32_t dest_temp, uint32_t dest_temp_components, const dxbc::Src& src) {
+  dxbc::Dest dest(dxbc::Dest::R(dest_temp, dest_temp_components));
+  dxbc::Src dest_src(dxbc::Src::R(dest_temp));
+
+  // Add the base vertex index.
+  a_.OpIAdd(dest, src,
+            LoadSystemConstant(SystemConstants::Index::kVertexIndexOffset,
+                               offsetof(SystemConstants, vertex_index_offset),
+                               dxbc::Src::kXXXX));
+
+  // Mask since the GPU only uses the lower 24 bits of the vertex index (tested
+  // on an Adreno 200 phone). `((index & 0xFFFFFF) + offset) & 0xFFFFFF` is the
+  // same as `(index + offset) & 0xFFFFFF`.
+  a_.OpAnd(dest, dest_src, dxbc::Src::LU(xenos::kVertexIndexMask));
+
+  // Clamp after offsetting.
+  a_.OpUMax(dest, dest_src,
+            LoadSystemConstant(SystemConstants::Index::kVertexIndexMinMax,
+                               offsetof(SystemConstants, vertex_index_min),
+                               dxbc::Src::kXXXX));
+  a_.OpUMin(dest, dest_src,
+            LoadSystemConstant(SystemConstants::Index::kVertexIndexMinMax,
+                               offsetof(SystemConstants, vertex_index_max),
+                               dxbc::Src::kXXXX));
+
+  // Convert to float.
+  a_.OpUToF(dest, dest_src);
 }
 
 void DxbcShaderTranslator::StartVertexShader_LoadVertexIndex() {
@@ -290,29 +393,22 @@ void DxbcShaderTranslator::StartVertexShader_LoadVertexIndex() {
   dxbc::Src index_src(dxbc::Src::R(reg, dxbc::Src::kXXXX));
 
   // Check if the closing vertex of a non-indexed line loop is being processed.
-  system_constants_used_ |= 1ull << kSysConst_LineLoopClosingIndex_Index;
   a_.OpINE(
-      index_dest,
-      dxbc::Src::V(uint32_t(InOutRegister::kVSInVertexIndex), dxbc::Src::kXXXX),
-      dxbc::Src::CB(cbuffer_index_system_constants_,
-                    uint32_t(CbufferRegister::kSystemConstants),
-                    kSysConst_LineLoopClosingIndex_Vec)
-          .Select(kSysConst_LineLoopClosingIndex_Comp));
+      index_dest, dxbc::Src::V1D(kInRegisterVSVertexIndex, dxbc::Src::kXXXX),
+      LoadSystemConstant(SystemConstants::Index::kLineLoopClosingIndex,
+                         offsetof(SystemConstants, line_loop_closing_index),
+                         dxbc::Src::kXXXX));
   // Zero the index if processing the closing vertex of a line loop, or do
   // nothing (replace 0 with 0) if not needed.
-  a_.OpAnd(
-      index_dest,
-      dxbc::Src::V(uint32_t(InOutRegister::kVSInVertexIndex), dxbc::Src::kXXXX),
-      index_src);
+  a_.OpAnd(index_dest,
+           dxbc::Src::V1D(kInRegisterVSVertexIndex, dxbc::Src::kXXXX),
+           index_src);
 
   {
     // Swap the vertex index's endianness.
-    system_constants_used_ |= 1ull << kSysConst_VertexIndexEndian_Index;
-    dxbc::Src endian_src(
-        dxbc::Src::CB(cbuffer_index_system_constants_,
-                      uint32_t(CbufferRegister::kSystemConstants),
-                      kSysConst_VertexIndexEndian_Vec)
-            .Select(kSysConst_VertexIndexEndian_Comp));
+    dxbc::Src endian_src(LoadSystemConstant(
+        SystemConstants::Index::kVertexIndexEndian,
+        offsetof(SystemConstants, vertex_index_endian), dxbc::Src::kXXXX));
     dxbc::Dest swap_temp_dest(dxbc::Dest::R(reg, 0b0010));
     dxbc::Src swap_temp_src(dxbc::Src::R(reg, dxbc::Src::kYYYY));
 
@@ -349,16 +445,9 @@ void DxbcShaderTranslator::StartVertexShader_LoadVertexIndex() {
     }
   }
 
-  // Add the base vertex index.
-  system_constants_used_ |= 1ull << kSysConst_VertexBaseIndex_Index;
-  a_.OpIAdd(index_dest, index_src,
-            dxbc::Src::CB(cbuffer_index_system_constants_,
-                          uint32_t(CbufferRegister::kSystemConstants),
-                          kSysConst_VertexBaseIndex_Vec)
-                .Select(kSysConst_VertexBaseIndex_Comp));
-
-  // Convert to float.
-  a_.OpIToF(index_dest, index_src);
+  // Remap the index to the needed range and convert it to floating-point.
+  RemapAndConvertVertexIndices(index_dest.index_1d_.index_,
+                               index_dest.write_mask_, index_src);
 
   if (uses_register_dynamic_addressing) {
     // Store to indexed GPR 0 in x0[0].
@@ -371,10 +460,19 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
   bool uses_register_dynamic_addressing =
       current_shader().uses_register_dynamic_addressing();
 
-  // Zero the interpolators.
-  for (uint32_t i = 0; i < xenos::kMaxInterpolators; ++i) {
-    a_.OpMov(dxbc::Dest::O(uint32_t(InOutRegister::kVSDSOutInterpolators) + i),
+  // Zero general-purpose registers to prevent crashes when the game
+  // references them after only initializing them conditionally.
+  for (uint32_t i = 0; i < register_count(); ++i) {
+    a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, i)
+                                              : dxbc::Dest::R(i),
              dxbc::Src::LF(0.0f));
+  }
+
+  // Zero the interpolators.
+  uint32_t interpolator_count =
+      xe::bit_count(GetModificationInterpolatorMask());
+  for (uint32_t i = 0; i < interpolator_count; ++i) {
+    a_.OpMov(dxbc::Dest::O(out_reg_vs_interpolators_ + i), dxbc::Src::LF(0.0f));
   }
 
   // Remember that x# are only accessible via mov load or store - use a
@@ -390,7 +488,7 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
       assert_true(register_count() >= 2);
       if (register_count() >= 1) {
         // Copy the domain location to r0.xyz.
-        // ZYX swizzle according to Call of Duty 3 and Viva Pinata.
+        // ZYX swizzle according to 415607E1 and 4D5307F2.
         in_domain_location_used_ |= 0b0111;
         a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, 0, 0b0111)
                                                   : dxbc::Dest::R(0, 0b0111),
@@ -404,9 +502,8 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
           in_control_point_index_used_ = true;
           for (uint32_t i = 0; i < 3; ++i) {
             a_.OpMov(control_point_index_dest.Mask(1 << i),
-                     dxbc::Src::VICP(
-                         i, uint32_t(InOutRegister::kDSInControlPointIndex),
-                         dxbc::Src::kXXXX));
+                     dxbc::Src::VICP(i, kInRegisterDSControlPointIndex,
+                                     dxbc::Src::kXXXX));
           }
         }
       }
@@ -417,32 +514,28 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
       if (register_count() >= 1) {
         // Copy the domain location to r0.xyz.
         // ZYX swizzle with r1.y == 0, according to the water shader in
-        // Banjo-Kazooie: Nuts & Bolts.
+        // 4D5307ED.
         in_domain_location_used_ |= 0b0111;
         a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, 0, 0b0111)
                                                   : dxbc::Dest::R(0, 0b0111),
                  dxbc::Src::VDomain(0b000110));
         if (register_count() >= 2) {
-          // Copy the primitive index to r1.x as a float.
-          uint32_t primitive_id_temp =
-              uses_register_dynamic_addressing ? PushSystemTemp() : 1;
-          in_primitive_id_used_ = true;
-          a_.OpUToF(dxbc::Dest::R(primitive_id_temp, 0b0001),
-                    dxbc::Src::VPrim());
-          if (uses_register_dynamic_addressing) {
-            a_.OpMov(dxbc::Dest::X(0, 1, 0b0001),
-                     dxbc::Src::R(primitive_id_temp, dxbc::Src::kXXXX));
-            // Release primitive_id_temp.
-            PopSystemTemp();
-          }
+          // Copy the patch index (already swapped and converted to float by the
+          // host vertex and hull shaders) to r1.x.
+          in_control_point_index_used_ = true;
+          a_.OpMov(uses_register_dynamic_addressing
+                       ? dxbc::Dest::X(0, 1, 0b0001)
+                       : dxbc::Dest::R(1, 0b0001),
+                   dxbc::Src::VICP(0, kInRegisterDSControlPointIndex,
+                                   dxbc::Src::kXXXX));
           // Write the swizzle of the barycentric coordinates to r1.y. It
           // appears that the tessellator offloads the reordering of coordinates
           // for edges to game shaders.
           //
-          // In Banjo-Kazooie: Nuts & Bolts, the water shader multiplies the
-          // first control point's position by r0.z, the second CP's by r0.y,
-          // and the third CP's by r0.x. But before doing that it swizzles
-          // r0.xyz the following way depending on the value in r1.y:
+          // In 4D5307ED, the water shader multiplies the first control point's
+          // position by r0.z, the second CP's by r0.y, and the third CP's by
+          // r0.x. But before doing that it swizzles r0.xyz the following way
+          // depending on the value in r1.y:
           // - ZXY for 1.0.
           // - YZX for 2.0.
           // - XZY for 4.0.
@@ -470,28 +563,26 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
         a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, 0, 0b0011)
                                                   : dxbc::Dest::R(0, 0b0011),
                  dxbc::Src::VDomain());
-        // Control point indices according to the shader from the main menu of
-        // Defender, which starts from `cndeq r2, c255.xxxy, r1.xyzz, r0.zzzz`,
-        // where c255.x is 0, and c255.y is 1.
+        // Control point indices according the main menu of 58410823, with
+        // `cndeq r2, c255.xxxy, r1.xyzz, r0.zzzz` in the prologue of the
+        // shader, where c255.x is 0, and c255.y is 1.
         // r0.z for (1 - r0.x) * (1 - r0.y)
         // r1.x for r0.x * (1 - r0.y)
         // r1.y for r0.x * r0.y
         // r1.z for (1 - r0.x) * r0.y
         in_control_point_index_used_ = true;
-        a_.OpMov(
-            uses_register_dynamic_addressing ? dxbc::Dest::X(0, 0, 0b0100)
-                                             : dxbc::Dest::R(0, 0b0100),
-            dxbc::Src::VICP(0, uint32_t(InOutRegister::kDSInControlPointIndex),
-                            dxbc::Src::kXXXX));
+        a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, 0, 0b0100)
+                                                  : dxbc::Dest::R(0, 0b0100),
+                 dxbc::Src::VICP(0, kInRegisterDSControlPointIndex,
+                                 dxbc::Src::kXXXX));
         if (register_count() >= 2) {
           dxbc::Dest r1_dest(uses_register_dynamic_addressing
                                  ? dxbc::Dest::X(0, 1)
                                  : dxbc::Dest::R(1));
           for (uint32_t i = 0; i < 3; ++i) {
             a_.OpMov(r1_dest.Mask(1 << i),
-                     dxbc::Src::VICP(
-                         1 + i, uint32_t(InOutRegister::kDSInControlPointIndex),
-                         dxbc::Src::kXXXX));
+                     dxbc::Src::VICP(1 + i, kInRegisterDSControlPointIndex,
+                                     dxbc::Src::kXXXX));
           }
         }
       }
@@ -501,30 +592,25 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
       assert_true(register_count() >= 2);
       if (register_count() >= 1) {
         // Copy the domain location to r0.yz.
-        // XY swizzle according to the ground shader in Viva Pinata.
+        // XY swizzle according to the ground shader in 4D5307F2.
         in_domain_location_used_ |= 0b0011;
         a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, 0, 0b0110)
                                                   : dxbc::Dest::R(0, 0b0110),
                  dxbc::Src::VDomain(0b010000));
-        // Copy the primitive index to r0.x as a float.
-        uint32_t primitive_id_temp =
-            uses_register_dynamic_addressing ? PushSystemTemp() : 0;
-        in_primitive_id_used_ = true;
-        a_.OpUToF(dxbc::Dest::R(primitive_id_temp, 0b0001), dxbc::Src::VPrim());
-        if (uses_register_dynamic_addressing) {
-          a_.OpMov(dxbc::Dest::X(0, 0, 0b0001),
-                   dxbc::Src::R(primitive_id_temp, dxbc::Src::kXXXX));
-          // Release primitive_id_temp.
-          PopSystemTemp();
-        }
+        // Copy the patch index (already swapped and converted to float by the
+        // host vertex and hull shaders) to r0.x.
+        in_control_point_index_used_ = true;
+        a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, 0, 0b0001)
+                                                  : dxbc::Dest::R(0, 0b0001),
+                 dxbc::Src::VICP(0, kInRegisterDSControlPointIndex,
+                                 dxbc::Src::kXXXX));
         if (register_count() >= 2) {
           // Write the swizzle of the UV coordinates to r1.x. It appears that
           // the tessellator offloads the reordering of coordinates for edges to
           // game shaders.
           //
-          // In Viva Pinata, if we assume that r0.y is U and r0.z is V, the
-          // factors each control point value is multiplied by are the
-          // following:
+          // In 4D5307F2, if we assume that r0.y is U and r0.z is V, the factors
+          // each control point value is multiplied by are the following:
           // - (1-u)*(1-v), u*(1-v), (1-u)*v, u*v for 0.0 (identity swizzle).
           // - u*(1-v), (1-u)*(1-v), u*v, (1-u)*v for 1.0 (YXWZ).
           // - u*v, (1-u)*v, u*(1-v), (1-u)*(1-v) for 2.0 (WZYX).
@@ -554,9 +640,27 @@ void DxbcShaderTranslator::StartPixelShader() {
     // Load the EDRAM addresses and the coverage.
     StartPixelShader_LoadROVParameters();
 
-    // Do early 2x2 quad rejection if it makes sense.
     if (ROV_IsDepthStencilEarly()) {
+      // Do early 2x2 quad rejection if it's safe.
       ROV_DepthStencilTest();
+    } else {
+      if (!current_shader().writes_depth()) {
+        // Get the derivatives of the screen-space (but not clamped to the
+        // viewport depth bounds yet - this happens after the pixel shader in
+        // Direct3D 11+; also linear within the triangle - thus constant
+        // derivatives along the triangle) Z for calculating per-sample depth
+        // values and the slope-scaled polygon offset to
+        // system_temp_depth_stencil_ before any return statement is possibly
+        // reached.
+        assert_true(system_temp_depth_stencil_ != UINT32_MAX);
+        dxbc::Src in_position_z(
+            dxbc::Src::V1D(in_reg_ps_position_, dxbc::Src::kZZZZ));
+        in_position_used_ |= 0b0100;
+        a_.OpDerivRTXCoarse(dxbc::Dest::R(system_temp_depth_stencil_, 0b0001),
+                            in_position_z);
+        a_.OpDerivRTYCoarse(dxbc::Dest::R(system_temp_depth_stencil_, 0b0010),
+                            in_position_z);
+      }
     }
   }
 
@@ -567,196 +671,235 @@ void DxbcShaderTranslator::StartPixelShader() {
 
   bool uses_register_dynamic_addressing =
       current_shader().uses_register_dynamic_addressing();
+  Modification shader_modification = GetDxbcShaderModification();
 
-  uint32_t interpolator_count =
-      std::min(xenos::kMaxInterpolators, register_count());
-  if (interpolator_count != 0) {
-    // Copy interpolants to GPRs.
-    uint32_t centroid_temp =
-        uses_register_dynamic_addressing ? PushSystemTemp() : UINT32_MAX;
-    system_constants_used_ |= 1ull
-                              << kSysConst_InterpolatorSamplingPattern_Index;
-    dxbc::Src sampling_pattern_src(
-        dxbc::Src::CB(cbuffer_index_system_constants_,
-                      uint32_t(CbufferRegister::kSystemConstants),
-                      kSysConst_InterpolatorSamplingPattern_Vec)
-            .Select(kSysConst_InterpolatorSamplingPattern_Comp));
-    for (uint32_t i = 0; i < interpolator_count; ++i) {
-      // With GPR dynamic addressing, first evaluate to centroid_temp r#, then
-      // store to the x#.
-      uint32_t centroid_register =
-          uses_register_dynamic_addressing ? centroid_temp : i;
-      // Check if the input needs to be interpolated at center (if the bit is
-      // set).
-      a_.OpAnd(dxbc::Dest::R(centroid_register, 0b0001), sampling_pattern_src,
-               dxbc::Src::LU(uint32_t(1) << i));
-      a_.OpIf(bool(xenos::SampleLocation::kCenter),
-              dxbc::Src::R(centroid_register, dxbc::Src::kXXXX));
-      // At center.
-      a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, i)
-                                                : dxbc::Dest::R(i),
-               dxbc::Src::V(uint32_t(InOutRegister::kPSInInterpolators) + i));
-      a_.OpElse();
-      // At centroid. Not really important that 2x MSAA is emulated using
-      // ForcedSampleCount 4 - what matters is that the sample position will
-      // be within the primitive, and the value will not be extrapolated.
-      a_.OpEvalCentroid(
-          dxbc::Dest::R(centroid_register),
-          dxbc::Src::V(uint32_t(InOutRegister::kPSInInterpolators) + i));
-      if (uses_register_dynamic_addressing) {
-        a_.OpMov(dxbc::Dest::X(0, i), dxbc::Src::R(centroid_register));
-      }
-      a_.OpEndIf();
-    }
-    if (centroid_temp != UINT32_MAX) {
-      PopSystemTemp();
-    }
+  // param_gen_interpolator is already 4 bits, no need for an interpolator count
+  // safety check.
+  uint32_t param_gen_interpolator =
+      (shader_modification.pixel.param_gen_enable &&
+       shader_modification.pixel.param_gen_interpolator < register_count())
+          ? shader_modification.pixel.param_gen_interpolator
+          : UINT32_MAX;
 
-    // Write pixel parameters - screen (XY absolute value) and point sprite (ZW
-    // absolute value) coordinates, facing (X sign bit) - to the specified
-    // interpolator register (ps_param_gen).
-    system_constants_used_ |= 1ull << kSysConst_PSParamGen_Index;
-    dxbc::Src param_gen_index_src(
-        dxbc::Src::CB(cbuffer_index_system_constants_,
-                      uint32_t(CbufferRegister::kSystemConstants),
-                      kSysConst_PSParamGen_Vec)
-            .Select(kSysConst_PSParamGen_Comp));
-    uint32_t param_gen_temp = PushSystemTemp();
-    // Check if pixel parameters need to be written.
-    a_.OpULT(dxbc::Dest::R(param_gen_temp, 0b0001), param_gen_index_src,
-             dxbc::Src::LU(interpolator_count));
-    a_.OpIf(true, dxbc::Src::R(param_gen_temp, dxbc::Src::kXXXX));
-    {
-      // XY - floored pixel position (Direct3D VPOS) in the absolute value,
-      // faceness as X sign bit. Using Z as scratch register now.
-      // Get XY address of the current host pixel as float (no matter whether
-      // the position is pixel-rate or sample-rate also due to float24 depth
-      // conversion requirements, it will be rounded the same). Rounding down,
-      // and taking the absolute value (because the sign bit of X stores the
-      // faceness), so in case the host GPU for some reason has quads used for
-      // derivative calculation at odd locations, the left and top edges will
-      // have correct derivative magnitude and LODs.
-      in_position_used_ |= 0b0011;
-      a_.OpRoundNI(dxbc::Dest::R(param_gen_temp, 0b0011),
-                   dxbc::Src::V(uint32_t(InOutRegister::kPSInPosition)));
-      if (draw_resolution_scale_ > 1) {
-        // Revert resolution scale - after truncating, so if the pixel position
-        // is passed to tfetch (assuming the game doesn't round it by itself),
-        // it will be sampled with higher resolution too.
-        a_.OpMul(dxbc::Dest::R(param_gen_temp, 0b0011),
-                 dxbc::Src::R(param_gen_temp),
-                 dxbc::Src::LF(1.0f / draw_resolution_scale_));
-      }
+  // Zero general-purpose registers to prevent crashes when the game
+  // references them after only initializing them conditionally, and copy
+  // interpolants to GPRs.
+  uint32_t interpolator_mask = GetModificationInterpolatorMask();
+  for (uint32_t i = 0; i < register_count(); ++i) {
+    if (i == param_gen_interpolator) {
+      continue;
+    }
+    a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, i)
+                                              : dxbc::Dest::R(i),
+             (i < xenos::kMaxInterpolators &&
+              (interpolator_mask & (UINT32_C(1) << i)))
+                 ? dxbc::Src::V1D(in_reg_ps_interpolators_ +
+                                  xe::bit_count(interpolator_mask &
+                                                ((UINT32_C(1) << i) - 1)))
+                 : dxbc::Src::LF(0.0f));
+  }
+
+  // Write the pixel parameters to the specified interpolator register
+  // (PsParamGen). The negate modified in DXBC flips the sign bit, so it can be
+  // used to write the flags.
+  if (param_gen_interpolator != UINT32_MAX) {
+    uint32_t param_gen_temp = uses_register_dynamic_addressing
+                                  ? PushSystemTemp()
+                                  : param_gen_interpolator;
+    // X - pixel X .0 in the magnitude, is back-facing in the sign bit.
+    // Y - pixel Y .0 in the magnitude, is point in the sign bit.
+    // Pixel position.
+    // Get the XY address of the current host pixel as float (no matter whether
+    // the position is pixel-rate or sample-rate also due to float24 depth
+    // conversion requirements, it will be rounded the same). Rounding down, and
+    // taking the absolute value (because the sign bit of X stores the
+    // faceness), so in case the host GPU for some reason has quads used for
+    // derivative calculation at odd locations, the left and top edges will have
+    // correct derivative magnitude and LODs.
+    in_position_used_ |= 0b0011;
+    a_.OpRoundNI(dxbc::Dest::R(param_gen_temp, 0b0011),
+                 dxbc::Src::V1D(in_reg_ps_position_));
+    uint32_t resolution_scaled_axes =
+        uint32_t(draw_resolution_scale_x_ > 1) |
+        (uint32_t(draw_resolution_scale_y_ > 1) << 1);
+    if (resolution_scaled_axes) {
+      // Revert resolution scale - after truncating, so if the pixel position
+      // is passed to tfetch (assuming the game doesn't round it by itself),
+      // it will be sampled with higher resolution too.
+      a_.OpMul(dxbc::Dest::R(param_gen_temp, resolution_scaled_axes),
+               dxbc::Src::R(param_gen_temp),
+               dxbc::Src::LF(1.0f / draw_resolution_scale_x_,
+                             1.0f / draw_resolution_scale_y_, 1.0f, 1.0f));
+    }
+    if (shader_modification.pixel.param_gen_point) {
+      // A point - always front-facing (the upper bit of X is 0), not a line
+      // (the upper bit of Z is 0).
+      // Take the absolute value of the position and apply the point flag.
+      a_.OpMov(dxbc::Dest::R(param_gen_temp, 0b0001),
+               dxbc::Src::R(param_gen_temp, dxbc::Src::kXXXX).Abs());
+      a_.OpMov(dxbc::Dest::R(param_gen_temp, 0b0010),
+               -(dxbc::Src::R(param_gen_temp, dxbc::Src::kYYYY).Abs()));
+      // ZW - point sprite coordinates.
+      // Saturate to avoid negative point coordinates if the center of the pixel
+      // is not covered, and extrapolation is done.
+      assert_true(in_reg_ps_point_coordinates_ != UINT32_MAX);
+      a_.OpMov(dxbc::Dest::R(param_gen_temp, 0b1100),
+               dxbc::Src::V1D(in_reg_ps_point_coordinates_, 0b0100 << 4), true);
+    } else {
+      // Take the absolute value of the position and apply the point flag.
       a_.OpMov(dxbc::Dest::R(param_gen_temp, 0b0011),
                dxbc::Src::R(param_gen_temp).Abs());
+      // Faceness.
       // Check if faceness applies to the current primitive type.
-      system_constants_used_ |= 1ull << kSysConst_Flags_Index;
-      a_.OpAnd(dxbc::Dest::R(param_gen_temp, 0b0100),
-               dxbc::Src::CB(cbuffer_index_system_constants_,
-                             uint32_t(CbufferRegister::kSystemConstants),
-                             kSysConst_Flags_Vec)
-                   .Select(kSysConst_Flags_Comp),
+      // Using Z as a temporary (not written yet).
+      a_.OpAnd(dxbc::Dest::R(param_gen_temp, 0b0100), LoadFlagsSystemConstant(),
                dxbc::Src::LU(kSysFlag_PrimitivePolygonal));
       a_.OpIf(true, dxbc::Src::R(param_gen_temp, dxbc::Src::kZZZZ));
       {
         // Negate modifier flips the sign bit even for 0 - set it to minus for
         // backfaces.
         in_front_face_used_ = true;
-        a_.OpMovC(
-            dxbc::Dest::R(param_gen_temp, 0b0001),
-            dxbc::Src::V(uint32_t(InOutRegister::kPSInFrontFaceAndSampleIndex),
-                         dxbc::Src::kXXXX),
-            dxbc::Src::R(param_gen_temp, dxbc::Src::kXXXX),
-            -dxbc::Src::R(param_gen_temp, dxbc::Src::kXXXX));
+        a_.OpMovC(dxbc::Dest::R(param_gen_temp, 0b0001),
+                  dxbc::Src::V1D(in_reg_ps_front_face_sample_index_,
+                                 dxbc::Src::kXXXX),
+                  dxbc::Src::R(param_gen_temp, dxbc::Src::kXXXX),
+                  -dxbc::Src::R(param_gen_temp, dxbc::Src::kXXXX));
       }
       a_.OpEndIf();
-      // ZW - UV within a point sprite in the absolute value, at centroid if
-      // requested for the interpolator.
-      dxbc::Dest point_coord_r_zw_dest(dxbc::Dest::R(param_gen_temp, 0b1100));
-      dxbc::Src point_coord_v_xxxy_src(dxbc::Src::V(
-          uint32_t(InOutRegister::kPSInPointParameters), 0b01000000));
-      system_constants_used_ |= 1ull
-                                << kSysConst_InterpolatorSamplingPattern_Index;
+      // No point coordinates.
+      // Z - is line in the sign bit.
+      // W - nothing.
       a_.OpUBFE(dxbc::Dest::R(param_gen_temp, 0b0100), dxbc::Src::LU(1),
-                param_gen_index_src,
-                dxbc::Src::CB(cbuffer_index_system_constants_,
-                              uint32_t(CbufferRegister::kSystemConstants),
-                              kSysConst_InterpolatorSamplingPattern_Vec)
-                    .Select(kSysConst_InterpolatorSamplingPattern_Comp));
-      a_.OpIf(bool(xenos::SampleLocation::kCenter),
-              dxbc::Src::R(param_gen_temp, dxbc::Src::kZZZZ));
-      // At center.
-      a_.OpMov(point_coord_r_zw_dest, point_coord_v_xxxy_src);
-      a_.OpElse();
-      // At centroid.
-      a_.OpEvalCentroid(point_coord_r_zw_dest, point_coord_v_xxxy_src);
-      a_.OpEndIf();
-      // Write ps_param_gen to the specified GPR.
-      dxbc::Src param_gen_src(dxbc::Src::R(param_gen_temp));
-      if (uses_register_dynamic_addressing) {
-        // Copy the GPR number to r# for relative addressing.
-        uint32_t param_gen_copy_temp = PushSystemTemp();
-        a_.OpMov(dxbc::Dest::R(param_gen_copy_temp, 0b0001),
-                 dxbc::Src::CB(cbuffer_index_system_constants_,
-                               uint32_t(CbufferRegister::kSystemConstants),
-                               kSysConst_PSParamGen_Vec)
-                     .Select(kSysConst_PSParamGen_Comp));
-        // Write to the GPR.
-        a_.OpMov(dxbc::Dest::X(0, dxbc::Index(param_gen_copy_temp, 0)),
-                 param_gen_src);
-        // Release param_gen_copy_temp.
-        PopSystemTemp();
-      } else {
-        if (interpolator_count == 1) {
-          a_.OpMov(dxbc::Dest::R(0), param_gen_src);
-        } else {
-          // Write to the r# using binary search.
-          uint32_t param_gen_copy_temp = PushSystemTemp();
-          auto param_gen_copy_node = [&](uint32_t low, uint32_t high,
-                                         const auto& self) -> void {
-            assert_true(low < high);
-            uint32_t mid = low + (high - low + 1) / 2;
-            a_.OpULT(dxbc::Dest::R(param_gen_copy_temp, 0b0001),
-                     param_gen_index_src, dxbc::Src::LU(mid));
-            a_.OpIf(true, dxbc::Src::R(param_gen_copy_temp, dxbc::Src::kXXXX));
-            {
-              if (low + 1 == mid) {
-                a_.OpMov(dxbc::Dest::R(low), param_gen_src);
-              } else {
-                self(low, mid - 1, self);
-              }
-            }
-            a_.OpElse();
-            {
-              if (mid == high) {
-                a_.OpMov(dxbc::Dest::R(mid), param_gen_src);
-              } else {
-                self(mid, high, self);
-              }
-            }
-            a_.OpEndIf();
-          };
-          param_gen_copy_node(0, interpolator_count - 1, param_gen_copy_node);
-          // Release param_gen_copy_temp.
-          PopSystemTemp();
-        }
-      }
+                dxbc::Src::LU(kSysFlag_PrimitiveLine_Shift),
+                LoadFlagsSystemConstant());
+      a_.OpIShL(dxbc::Dest::R(param_gen_temp, 0b0100),
+                dxbc::Src::R(param_gen_temp, dxbc::Src::kZZZZ),
+                dxbc::Src::LU(31));
+      a_.OpMov(dxbc::Dest::R(param_gen_temp, 0b1000), dxbc::Src::LF(0.0f));
     }
-    // Close the ps_param_gen check.
-    a_.OpEndIf();
-    // Release param_gen_temp.
-    PopSystemTemp();
+    // With dynamic register addressing, write the PsParamGen to the GPR.
+    if (uses_register_dynamic_addressing) {
+      a_.OpMov(dxbc::Dest::X(0, param_gen_interpolator),
+               dxbc::Src::R(param_gen_temp));
+      // Release param_gen_temp.
+      PopSystemTemp();
+    }
+  }
+
+  if (current_shader().memexport_eM_written()) {
+    // Make sure memexport is done only once for a guest pixel.
+    dxbc::Dest memexport_enabled_dest(
+        dxbc::Dest::R(system_temp_memexport_enabled_and_eM_written_, 0b0001));
+    dxbc::Src memexport_enabled_src(dxbc::Src::R(
+        system_temp_memexport_enabled_and_eM_written_, dxbc::Src::kXXXX));
+    uint32_t resolution_scaled_axes =
+        uint32_t(draw_resolution_scale_x_ > 1) |
+        (uint32_t(draw_resolution_scale_y_ > 1) << 1);
+    if (resolution_scaled_axes) {
+      uint32_t memexport_condition_temp = PushSystemTemp();
+      // Only do memexport for one host pixel in a guest pixel - prefer the
+      // host pixel closer to the center of the guest pixel, but one that's
+      // covered with the half-pixel offset according to the top-left rule (1
+      // for 2x because 0 isn't covered with the half-pixel offset, 1 for 3x
+      // because it's the center and is covered with the half-pixel offset too).
+      in_position_used_ |= resolution_scaled_axes;
+      a_.OpFToU(dxbc::Dest::R(memexport_condition_temp, resolution_scaled_axes),
+                dxbc::Src::V1D(in_reg_ps_position_));
+      a_.OpUDiv(dxbc::Dest::Null(),
+                dxbc::Dest::R(memexport_condition_temp, resolution_scaled_axes),
+                dxbc::Src::R(memexport_condition_temp),
+                dxbc::Src::LU(draw_resolution_scale_x_,
+                              draw_resolution_scale_y_, 0, 0));
+      a_.OpIEq(dxbc::Dest::R(memexport_condition_temp, resolution_scaled_axes),
+               dxbc::Src::R(memexport_condition_temp),
+               dxbc::Src::LU(draw_resolution_scale_x_ >> 1,
+                             draw_resolution_scale_y_ >> 1, 0, 0));
+      for (uint32_t i = 0; i < 2; ++i) {
+        if (!(resolution_scaled_axes & (1 << i))) {
+          continue;
+        }
+        a_.OpAnd(memexport_enabled_dest, memexport_enabled_src,
+                 dxbc::Src::R(memexport_condition_temp).Select(i));
+      }
+      // Release memexport_condition_temp.
+      PopSystemTemp();
+    }
+    // With sample-rate shading (with float24 conversion), only do memexport
+    // from one sample (as the shader is invoked multiple times for a pixel),
+    // if SV_SampleIndex == firstbit_lo(SV_Coverage). For zero coverage,
+    // firstbit_lo returns 0xFFFFFFFF.
+    if (IsSampleRate()) {
+      uint32_t memexport_condition_temp = PushSystemTemp();
+      a_.OpFirstBitLo(dxbc::Dest::R(memexport_condition_temp, 0b0001),
+                      dxbc::Src::VCoverage());
+      a_.OpIEq(
+          dxbc::Dest::R(memexport_condition_temp, 0b0001),
+          dxbc::Src::V1D(in_reg_ps_front_face_sample_index_, dxbc::Src::kYYYY),
+          dxbc::Src::R(memexport_condition_temp, dxbc::Src::kXXXX));
+      a_.OpAnd(memexport_enabled_dest, memexport_enabled_src,
+               dxbc::Src::R(memexport_condition_temp, dxbc::Src::kXXXX));
+      // Release memexport_condition_temp.
+      PopSystemTemp();
+    }
   }
 }
 
 void DxbcShaderTranslator::StartTranslation() {
+  // Set up the input and output registers.
+  Modification shader_modification = GetDxbcShaderModification();
+  uint32_t interpolator_register_mask = GetModificationInterpolatorMask();
+  uint32_t interpolator_register_count =
+      xe::bit_count(interpolator_register_mask);
+  if (is_vertex_shader()) {
+    uint32_t out_reg_index = 0;
+    // Interpolators.
+    if (interpolator_register_count) {
+      out_reg_vs_interpolators_ = out_reg_index;
+      out_reg_index += interpolator_register_count;
+    }
+    // Position.
+    out_reg_vs_position_ = out_reg_index;
+    ++out_reg_index;
+    // Clip and cull distances.
+    uint32_t clip_and_cull_distance_count =
+        shader_modification.GetVertexClipDistanceCount() +
+        shader_modification.GetVertexCullDistanceCount();
+    if (clip_and_cull_distance_count) {
+      out_reg_vs_clip_cull_distances_ = out_reg_index;
+      out_reg_index += (clip_and_cull_distance_count + 3) >> 2;
+    }
+    // Point size.
+    if (shader_modification.vertex.output_point_size) {
+      out_reg_vs_point_size_ = out_reg_index;
+      ++out_reg_index;
+    }
+  } else if (is_pixel_shader()) {
+    uint32_t in_reg_index = 0;
+    // Interpolators.
+    if (interpolator_register_count) {
+      in_reg_ps_interpolators_ = in_reg_index;
+      in_reg_index += interpolator_register_count;
+    }
+    // Point coordinates.
+    if (shader_modification.pixel.param_gen_point) {
+      in_reg_ps_point_coordinates_ = in_reg_index;
+      ++in_reg_index;
+    }
+    // Position.
+    in_reg_ps_position_ = in_reg_index;
+    ++in_reg_index;
+    // System inputs.
+    in_reg_ps_front_face_sample_index_ = in_reg_index;
+    ++in_reg_index;
+  }
+
   // Allocate global system temporary registers that may also be used in the
   // epilogue.
   if (is_vertex_shader()) {
     system_temp_position_ = PushSystemTemp(0b1111);
     system_temp_point_size_edge_flag_kill_vertex_ = PushSystemTemp(0b0100);
     // Set the point size to a negative value to tell the geometry shader that
-    // it should use the global point size if the vertex shader does not
+    // it should use the default point size if the vertex shader does not
     // override it.
     a_.OpMov(
         dxbc::Dest::R(system_temp_point_size_edge_flag_kill_vertex_, 0b0001),
@@ -767,15 +910,24 @@ void DxbcShaderTranslator::StartTranslation() {
       system_temp_rov_params_ = PushSystemTemp();
     }
     if (IsDepthStencilSystemTempUsed()) {
-      // If the shader doesn't write to oDepth, and ROV is used, each
-      // component will be written to if depth/stencil is enabled and the
-      // respective sample is covered - so need to initialize now because the
-      // first writes will be conditional.
-      // If the shader writes to oDepth, this is oDepth of the shader, written
-      // by the guest code, so initialize because assumptions can't be made
-      // about the integrity of the guest code.
-      system_temp_depth_stencil_ =
-          PushSystemTemp(current_shader().writes_depth() ? 0b0001 : 0b1111);
+      uint32_t depth_stencil_temp_zero_mask;
+      if (current_shader().writes_depth()) {
+        // X holds the guest oDepth - make sure it's always initialized because
+        // assumptions can't be made about the integrity of the guest code.
+        depth_stencil_temp_zero_mask = 0b0001;
+      } else {
+        assert_true(edram_rov_used_);
+        if (ROV_IsDepthStencilEarly()) {
+          // XYZW hold per-sample depth / stencil after the early test - written
+          // conditionally based on the coverage, ensure registers are
+          // initialized unconditionally for safety.
+          depth_stencil_temp_zero_mask = 0b1111;
+        } else {
+          // XY hold Z gradients, written unconditionally in the beginning.
+          depth_stencil_temp_zero_mask = 0b0000;
+        }
+      }
+      system_temp_depth_stencil_ = PushSystemTemp(depth_stencil_temp_zero_mask);
     }
     uint32_t shader_writes_color_targets =
         current_shader().writes_color_targets();
@@ -786,34 +938,27 @@ void DxbcShaderTranslator::StartTranslation() {
     }
   }
 
-  if (!is_depth_only_pixel_shader_) {
-    // Allocate temporary registers for memexport addresses and data.
-    std::memset(system_temps_memexport_address_, 0xFF,
-                sizeof(system_temps_memexport_address_));
-    std::memset(system_temps_memexport_data_, 0xFF,
-                sizeof(system_temps_memexport_data_));
-    system_temp_memexport_written_ = UINT32_MAX;
-    const uint8_t* memexports_written = current_shader().memexport_eM_written();
-    for (uint32_t i = 0; i < Shader::kMaxMemExports; ++i) {
-      uint32_t memexport_alloc_written = memexports_written[i];
-      if (memexport_alloc_written == 0) {
-        continue;
-      }
-      // If memexport is used at all, allocate a register containing whether eM#
-      // have actually been written to.
-      if (system_temp_memexport_written_ == UINT32_MAX) {
-        system_temp_memexport_written_ = PushSystemTemp(0b1111);
-      }
-      system_temps_memexport_address_[i] = PushSystemTemp(0b1111);
-      uint32_t memexport_data_index;
-      while (xe::bit_scan_forward(memexport_alloc_written,
-                                  &memexport_data_index)) {
-        memexport_alloc_written &= ~(1u << memexport_data_index);
-        system_temps_memexport_data_[i][memexport_data_index] =
-            PushSystemTemp();
-      }
+  // Allocate temporary registers for memexport.
+  uint8_t memexport_eM_written = current_shader().memexport_eM_written();
+  if (memexport_eM_written) {
+    system_temp_memexport_enabled_and_eM_written_ = PushSystemTemp(0b0010);
+    // Initialize the memexport conditional to whether the shared memory is
+    // currently bound as UAV (to 0 or UINT32_MAX). It can be made narrower
+    // later.
+    a_.OpIBFE(
+        dxbc::Dest::R(system_temp_memexport_enabled_and_eM_written_, 0b0001),
+        dxbc::Src::LU(1), dxbc::Src::LU(kSysFlag_SharedMemoryIsUAV_Shift),
+        LoadFlagsSystemConstant());
+    system_temp_memexport_address_ = PushSystemTemp(0b1111);
+    uint8_t memexport_eM_remaining = memexport_eM_written;
+    uint32_t memexport_eM_index;
+    while (xe::bit_scan_forward(memexport_eM_remaining, &memexport_eM_index)) {
+      memexport_eM_remaining &= ~(uint8_t(1) << memexport_eM_index);
+      system_temps_memexport_data_[memexport_eM_index] = PushSystemTemp(0b1111);
     }
+  }
 
+  if (!is_depth_only_pixel_shader_) {
     // Allocate system temporary variables for the translated code. Since access
     // depends on the guest code (thus no guarantees), initialize everything
     // now (except for pv, it's an internal temporary variable, not accessible
@@ -823,17 +968,7 @@ void DxbcShaderTranslator::StartTranslation() {
     system_temp_aL_ = PushSystemTemp(0b1111);
     system_temp_loop_count_ = PushSystemTemp(0b1111);
     system_temp_grad_h_lod_ = PushSystemTemp(0b1111);
-    system_temp_grad_v_ = PushSystemTemp(0b0111);
-
-    // Zero general-purpose registers to prevent crashes when the game
-    // references them after only initializing them conditionally.
-    for (uint32_t i = is_pixel_shader() ? xenos::kMaxInterpolators : 0;
-         i < register_count(); ++i) {
-      a_.OpMov(current_shader().uses_register_dynamic_addressing()
-                   ? dxbc::Dest::X(0, i)
-                   : dxbc::Dest::R(i),
-               dxbc::Src::LF(0.0f));
-    }
+    system_temp_grad_v_vfetch_address_ = PushSystemTemp(0b1111);
   }
 
   // Write stage-specific prologue.
@@ -864,11 +999,7 @@ void DxbcShaderTranslator::CompleteVertexOrDomainShader() {
   dxbc::Dest temp_x_dest(dxbc::Dest::R(temp, 0b0001));
   dxbc::Src temp_x_src(dxbc::Src::R(temp, dxbc::Src::kXXXX));
 
-  system_constants_used_ |= 1ull << kSysConst_Flags_Index;
-  dxbc::Src flags_src(dxbc::Src::CB(cbuffer_index_system_constants_,
-                                    uint32_t(CbufferRegister::kSystemConstants),
-                                    kSysConst_Flags_Vec)
-                          .Select(kSysConst_Flags_Comp));
+  dxbc::Src flags_src(LoadFlagsSystemConstant());
 
   // Check if the shader already returns W, not 1/W, and if it doesn't, turn 1/W
   // into W. Using div rather than relaxed-precision rcp for safety.
@@ -880,8 +1011,6 @@ void DxbcShaderTranslator::CompleteVertexOrDomainShader() {
 
   // Check if the shader returns XY/W rather than XY, and if it does, revert
   // that.
-  // TODO(Triang3l): Check if having XY or Z pre-divided by W should result in
-  // affine interpolation.
   a_.OpAnd(temp_x_dest, flags_src, dxbc::Src::LU(kSysFlag_XYDividedByW));
   a_.OpIf(true, temp_x_src);
   a_.OpMul(dxbc::Dest::R(system_temp_position_, 0b0011),
@@ -890,8 +1019,6 @@ void DxbcShaderTranslator::CompleteVertexOrDomainShader() {
   a_.OpEndIf();
 
   // Check if the shader returns Z/W rather than Z, and if it does, revert that.
-  // TODO(Triang3l): Check if having XY or Z pre-divided by W should result in
-  // affine interpolation.
   a_.OpAnd(temp_x_dest, flags_src, dxbc::Src::LU(kSysFlag_ZDividedByW));
   a_.OpIf(true, temp_x_src);
   a_.OpMul(dxbc::Dest::R(system_temp_position_, 0b0100),
@@ -899,108 +1026,88 @@ void DxbcShaderTranslator::CompleteVertexOrDomainShader() {
            dxbc::Src::R(system_temp_position_, dxbc::Src::kWWWW));
   a_.OpEndIf();
 
-  // Zero-initialize SV_ClipDistance# (for user clip planes) and SV_CullDistance
-  // (for vertex kill) in case they're not needed.
-  a_.OpMov(dxbc::Dest::O(uint32_t(InOutRegister::kVSDSOutClipDistance0123)),
-           dxbc::Src::LF(0.0f));
-  a_.OpMov(dxbc::Dest::O(
-               uint32_t(InOutRegister::kVSDSOutClipDistance45AndCullDistance),
-               0b0111),
-           dxbc::Src::LF(0.0f));
+  Modification shader_modification = GetDxbcShaderModification();
+  uint32_t clip_distance_next_component = 0;
+  uint32_t cull_distance_next_component =
+      shader_modification.GetVertexClipDistanceCount();
+
   // Clip against user clip planes.
-  // Not possible to handle UCP_CULL_ONLY_ENA with the same shader though, since
-  // there can be only 8 SV_ClipDistance + SV_CullDistance values at most, but
-  // 12 would be needed.
-  system_constants_used_ |= 1ull << kSysConst_UserClipPlanes_Index;
-  for (uint32_t i = 0; i < 6; ++i) {
-    // Check if the clip plane is enabled - this `if` is needed, as opposed to
-    // just zeroing the clip planes in the constants, so Infinity and NaN in the
-    // position won't have any effect caused by this if clip planes are
-    // disabled.
-    a_.OpAnd(temp_x_dest, flags_src,
-             dxbc::Src::LU(kSysFlag_UserClipPlane0 << i));
-    a_.OpIf(true, temp_x_src);
-    a_.OpDP4(dxbc::Dest::O(
-                 uint32_t(InOutRegister::kVSDSOutClipDistance0123) + (i >> 2),
-                 1 << (i & 3)),
-             dxbc::Src::R(system_temp_position_),
-             dxbc::Src::CB(cbuffer_index_system_constants_,
-                           uint32_t(CbufferRegister::kSystemConstants),
-                           kSysConst_UserClipPlanes_Vec + i));
-    a_.OpEndIf();
+  uint32_t& ucp_clip_cull_distance_next_component_ref =
+      shader_modification.vertex.user_clip_plane_cull
+          ? cull_distance_next_component
+          : clip_distance_next_component;
+  for (uint32_t i = 0; i < shader_modification.vertex.user_clip_plane_count;
+       ++i) {
+    a_.OpDP4(
+        dxbc::Dest::O(out_reg_vs_clip_cull_distances_ +
+                          (ucp_clip_cull_distance_next_component_ref >> 2),
+                      UINT32_C(1)
+                          << (ucp_clip_cull_distance_next_component_ref & 3)),
+        dxbc::Src::R(system_temp_position_),
+        LoadSystemConstant(
+            SystemConstants::Index::kUserClipPlanes,
+            offsetof(SystemConstants, user_clip_planes) + sizeof(float) * 4 * i,
+            dxbc::Src::kXYZW));
+    ++ucp_clip_cull_distance_next_component_ref;
   }
 
   // Apply scale for guest to host viewport and clip space conversion. Also, if
   // the vertex shader is multipass, the NDC scale constant can be used to set
   // position to NaN to kill all primitives.
-  system_constants_used_ |= 1ull << kSysConst_NDCScale_Index;
   a_.OpMul(dxbc::Dest::R(system_temp_position_, 0b0111),
            dxbc::Src::R(system_temp_position_),
-           dxbc::Src::CB(cbuffer_index_system_constants_,
-                         uint32_t(CbufferRegister::kSystemConstants),
-                         kSysConst_NDCScale_Vec,
-                         kSysConst_NDCScale_Comp * 0b010101 + 0b100100));
+           LoadSystemConstant(SystemConstants::Index::kNDCScale,
+                              offsetof(SystemConstants, ndc_scale), 0b100100));
 
   // Apply offset (multiplied by W) used for the same purposes.
-  system_constants_used_ |= 1ull << kSysConst_NDCOffset_Index;
   a_.OpMAd(dxbc::Dest::R(system_temp_position_, 0b0111),
-           dxbc::Src::CB(cbuffer_index_system_constants_,
-                         uint32_t(CbufferRegister::kSystemConstants),
-                         kSysConst_NDCOffset_Vec,
-                         kSysConst_NDCOffset_Comp * 0b010101 + 0b100100),
+           LoadSystemConstant(SystemConstants::Index::kNDCOffset,
+                              offsetof(SystemConstants, ndc_offset), 0b100100),
            dxbc::Src::R(system_temp_position_, dxbc::Src::kWWWW),
            dxbc::Src::R(system_temp_position_));
 
-  // Write Z and W of the position to a separate attribute so ROV output can get
-  // per-sample depth.
-  a_.OpMov(dxbc::Dest::O(uint32_t(InOutRegister::kVSDSOutClipSpaceZW), 0b0011),
-           dxbc::Src::R(system_temp_position_, 0b1110));
-
-  // Assuming SV_CullDistance was zeroed earlier in this function.
-  // Kill the primitive if needed - check if the shader wants to kill.
-  // TODO(Triang3l): Find if the condition is actually the flag being non-zero.
-  a_.OpNE(temp_x_dest,
-          dxbc::Src::R(system_temp_point_size_edge_flag_kill_vertex_,
-                       dxbc::Src::kZZZZ),
-          dxbc::Src::LF(0.0f));
-  a_.OpIf(true, temp_x_src);
-  {
-    // Extract the killing condition.
-    a_.OpAnd(temp_x_dest, flags_src,
-             dxbc::Src::LU(kSysFlag_KillIfAnyVertexKilled));
-    a_.OpIf(true, temp_x_src);
-    {
-      // Kill the primitive if any vertex is killed - write NaN to position.
-      a_.OpMov(dxbc::Dest::R(system_temp_position_, 0b1000),
-               dxbc::Src::LF(std::nanf("")));
-    }
-    a_.OpElse();
-    {
-      // Kill the primitive if all vertices are killed - set SV_CullDistance to
-      // negative.
-      a_.OpMov(
-          dxbc::Dest::O(
-              uint32_t(InOutRegister::kVSDSOutClipDistance45AndCullDistance),
-              0b0100),
-          dxbc::Src::LF(-1.0f));
-    }
-    a_.OpEndIf();
+  // Kill the primitive if needed - check if the shader wants to kill (bits
+  // 0:30 of the vertex kill register are not zero - using `and`, not abs or
+  // especially 0.0f comparison, to avoid potential denormal flushing).
+  bool shader_writes_vertex_kill =
+      (current_shader().writes_point_size_edge_flag_kill_vertex() & 0b100) != 0;
+  if (shader_writes_vertex_kill) {
+    a_.OpAnd(temp_x_dest,
+             dxbc::Src::R(system_temp_point_size_edge_flag_kill_vertex_,
+                          dxbc::Src::kZZZZ),
+             dxbc::Src::LU(UINT32_C(0x7FFFFFFF)));
   }
-  a_.OpEndIf();
+  if (shader_modification.vertex.vertex_kill_and) {
+    // AND operator - write an SV_CullDistance.
+    dxbc::Dest vertex_kill_dest(dxbc::Dest::O(
+        out_reg_vs_clip_cull_distances_ + (cull_distance_next_component >> 2),
+        UINT32_C(1) << (cull_distance_next_component & 3)));
+    if (shader_writes_vertex_kill) {
+      a_.OpMovC(vertex_kill_dest, temp_x_src, dxbc::Src::LF(-1.0f),
+                dxbc::Src::LF(0.0f));
+    } else {
+      a_.OpMov(vertex_kill_dest, dxbc::Src::LF(0.0f));
+    }
+    ++cull_distance_next_component;
+  } else {
+    // OR operator - set the position to NaN.
+    if (shader_writes_vertex_kill) {
+      a_.OpMovC(dxbc::Dest::R(system_temp_position_, 0b1000), temp_x_src,
+                dxbc::Src::LF(std::nanf("")),
+                dxbc::Src::R(system_temp_position_, dxbc::Src::kWWWW));
+    }
+  }
 
   // Write the position to the output.
-  a_.OpMov(dxbc::Dest::O(uint32_t(InOutRegister::kVSDSOutPosition)),
+  a_.OpMov(dxbc::Dest::O(out_reg_vs_position_),
            dxbc::Src::R(system_temp_position_));
 
-  // Zero the point coordinate (will be set in the geometry shader if needed)
-  // and write the point size.
-  a_.OpMov(
-      dxbc::Dest::O(uint32_t(InOutRegister::kVSDSOutPointParameters), 0b0011),
-      dxbc::Src::LF(0.0f));
-  a_.OpMov(
-      dxbc::Dest::O(uint32_t(InOutRegister::kVSDSOutPointParameters), 0b0100),
-      dxbc::Src::R(system_temp_point_size_edge_flag_kill_vertex_,
-                   dxbc::Src::kXXXX));
+  // Write the point size.
+  if (out_reg_vs_point_size_ != UINT32_MAX) {
+    a_.OpMov(dxbc::Dest::O(out_reg_vs_point_size_, 0b0001),
+             dxbc::Src::R(system_temp_point_size_edge_flag_kill_vertex_,
+                          dxbc::Src::kXXXX));
+  }
 
   // Release temp.
   PopSystemTemp();
@@ -1028,29 +1135,21 @@ void DxbcShaderTranslator::CompleteShaderCode() {
     // - system_temp_aL_.
     // - system_temp_loop_count_.
     // - system_temp_grad_h_lod_.
-    // - system_temp_grad_v_.
+    // - system_temp_grad_v_vfetch_address_.
     PopSystemTemp(6);
+  }
 
-    // Write memexported data to the shared memory UAV.
-    ExportToMemory();
+  uint8_t memexport_eM_written = current_shader().memexport_eM_written();
+  if (memexport_eM_written) {
+    // Write data for the last memexport.
+    ExportToMemory(
+        current_shader().memexport_eM_potentially_written_before_end());
 
-    // Release memexport temporary registers.
-    for (int i = Shader::kMaxMemExports - 1; i >= 0; --i) {
-      if (system_temps_memexport_address_[i] == UINT32_MAX) {
-        continue;
-      }
-      // Release exported data registers.
-      for (int j = 4; j >= 0; --j) {
-        if (system_temps_memexport_data_[i][j] != UINT32_MAX) {
-          PopSystemTemp();
-        }
-      }
-      // Release the address register.
-      PopSystemTemp();
-    }
-    if (system_temp_memexport_written_ != UINT32_MAX) {
-      PopSystemTemp();
-    }
+    // Release memexport temporary registers:
+    // - system_temp_memexport_enabled_and_eM_written_.
+    // - system_temp_memexport_address_.
+    // - system_temps_memexport_data_.
+    PopSystemTemp(xe::bit_count(uint32_t(memexport_eM_written)) + 2);
   }
 
   // Write stage-specific epilogue.
@@ -1320,12 +1419,12 @@ dxbc::Src DxbcShaderTranslator::LoadOperand(const InstructionOperand& operand,
 
   dxbc::Index index(operand.storage_index);
   switch (operand.storage_addressing_mode) {
-    case InstructionStorageAddressingMode::kStatic:
+    case InstructionStorageAddressingMode::kAbsolute:
       break;
-    case InstructionStorageAddressingMode::kAddressAbsolute:
+    case InstructionStorageAddressingMode::kAddressRegisterRelative:
       index = dxbc::Index(system_temp_ps_pc_p0_a0_, 3, operand.storage_index);
       break;
-    case InstructionStorageAddressingMode::kAddressRelative:
+    case InstructionStorageAddressingMode::kLoopRelative:
       index = dxbc::Index(system_temp_aL_, 0, operand.storage_index);
       break;
   }
@@ -1354,7 +1453,7 @@ dxbc::Src DxbcShaderTranslator::LoadOperand(const InstructionOperand& operand,
         src = dxbc::Src::R(temp);
       } else {
         assert_true(operand.storage_addressing_mode ==
-                    InstructionStorageAddressingMode::kStatic);
+                    InstructionStorageAddressingMode::kAbsolute);
         src = dxbc::Src::R(index.index_);
       }
     } break;
@@ -1365,7 +1464,7 @@ dxbc::Src DxbcShaderTranslator::LoadOperand(const InstructionOperand& operand,
       const Shader::ConstantRegisterMap& constant_register_map =
           current_shader().constant_register_map();
       if (operand.storage_addressing_mode ==
-          InstructionStorageAddressingMode::kStatic) {
+          InstructionStorageAddressingMode::kAbsolute) {
         uint32_t float_constant_index =
             constant_register_map.GetPackedFloatConstantIndex(
                 operand.storage_index);
@@ -1418,13 +1517,13 @@ void DxbcShaderTranslator::StoreResult(const InstructionResult& result,
       if (current_shader().uses_register_dynamic_addressing()) {
         dxbc::Index register_index(result.storage_index);
         switch (result.storage_addressing_mode) {
-          case InstructionStorageAddressingMode::kStatic:
+          case InstructionStorageAddressingMode::kAbsolute:
             break;
-          case InstructionStorageAddressingMode::kAddressAbsolute:
+          case InstructionStorageAddressingMode::kAddressRegisterRelative:
             register_index =
                 dxbc::Index(system_temp_ps_pc_p0_a0_, 3, result.storage_index);
             break;
-          case InstructionStorageAddressingMode::kAddressRelative:
+          case InstructionStorageAddressingMode::kLoopRelative:
             register_index =
                 dxbc::Index(system_temp_aL_, 0, result.storage_index);
             break;
@@ -1432,14 +1531,19 @@ void DxbcShaderTranslator::StoreResult(const InstructionResult& result,
         dest = dxbc::Dest::X(0, register_index);
       } else {
         assert_true(result.storage_addressing_mode ==
-                    InstructionStorageAddressingMode::kStatic);
+                    InstructionStorageAddressingMode::kAbsolute);
         dest = dxbc::Dest::R(result.storage_index);
       }
       break;
-    case InstructionStorageTarget::kInterpolator:
-      dest = dxbc::Dest::O(uint32_t(InOutRegister::kVSDSOutInterpolators) +
-                           result.storage_index);
-      break;
+    case InstructionStorageTarget::kInterpolator: {
+      uint32_t interpolator_mask = GetModificationInterpolatorMask();
+      uint32_t interpolator_bit = UINT32_C(1) << result.storage_index;
+      if (interpolator_mask & interpolator_bit) {
+        dest = dxbc::Dest::O(
+            out_reg_vs_interpolators_ +
+            xe::bit_count(interpolator_mask & (interpolator_bit - 1)));
+      }
+    } break;
     case InstructionStorageTarget::kPosition:
       dest = dxbc::Dest::R(system_temp_position_);
       break;
@@ -1448,36 +1552,22 @@ void DxbcShaderTranslator::StoreResult(const InstructionResult& result,
       dest = dxbc::Dest::R(system_temp_point_size_edge_flag_kill_vertex_);
       break;
     case InstructionStorageTarget::kExportAddress:
-      // Validate memexport writes (Halo 3 has some weird invalid ones).
-      if (!can_store_memexport_address || memexport_alloc_current_count_ == 0 ||
-          memexport_alloc_current_count_ > Shader::kMaxMemExports ||
-          system_temps_memexport_address_[memexport_alloc_current_count_ - 1] ==
-              UINT32_MAX) {
+      if (!current_shader().memexport_eM_written()) {
         return;
       }
-      dest = dxbc::Dest::R(
-          system_temps_memexport_address_[memexport_alloc_current_count_ - 1]);
+      dest = dxbc::Dest::R(system_temp_memexport_address_);
       break;
     case InstructionStorageTarget::kExportData: {
-      // Validate memexport writes (Halo 3 has some weird invalid ones).
-      if (memexport_alloc_current_count_ == 0 ||
-          memexport_alloc_current_count_ > Shader::kMaxMemExports ||
-          system_temps_memexport_data_[memexport_alloc_current_count_ - 1]
-                                      [result.storage_index] == UINT32_MAX) {
-        return;
-      }
-      dest = dxbc::Dest::R(
-          system_temps_memexport_data_[memexport_alloc_current_count_ - 1]
-                                      [result.storage_index]);
+      assert_not_zero(current_shader().memexport_eM_written() &
+                      (uint8_t(1) << result.storage_index));
+      dest = dxbc::Dest::R(system_temps_memexport_data_[result.storage_index]);
       // Mark that the eM# has been written to and needs to be exported.
       assert_not_zero(used_write_mask);
-      uint32_t memexport_index = memexport_alloc_current_count_ - 1;
-      a_.OpOr(dxbc::Dest::R(system_temp_memexport_written_,
-                            1 << (memexport_index >> 2)),
-              dxbc::Src::R(system_temp_memexport_written_)
-                  .Select(memexport_index >> 2),
-              dxbc::Src::LU(uint32_t(1) << (result.storage_index +
-                                            ((memexport_index & 3) << 3))));
+      a_.OpOr(
+          dxbc::Dest::R(system_temp_memexport_enabled_and_eM_written_, 0b0010),
+          dxbc::Src::R(system_temp_memexport_enabled_and_eM_written_,
+                       dxbc::Src::kYYYY),
+          dxbc::Src::LU(uint8_t(1) << result.storage_index));
     } break;
     case InstructionStorageTarget::kColor:
       assert_not_zero(used_write_mask);
@@ -1547,6 +1637,30 @@ void DxbcShaderTranslator::StoreResult(const InstructionResult& result,
                            float((constant_1_mask >> 1) & 1),
                            float((constant_1_mask >> 2) & 1),
                            float((constant_1_mask >> 3) & 1)));
+  }
+
+  // Make the point size non-negative as negative is used to indicate that the
+  // default size must be used, and also clamp it to the bounds the way the R400
+  // (Adreno 200, to be more precise) hardware clamps it (functionally like a
+  // signed 32-bit integer, -NaN and -Infinity...-0 to the minimum, +NaN to the
+  // maximum).
+  if (result.storage_target ==
+          InstructionStorageTarget::kPointSizeEdgeFlagKillVertex &&
+      (used_write_mask & 0b0001)) {
+    a_.OpIMax(
+        dxbc::Dest::R(system_temp_point_size_edge_flag_kill_vertex_, 0b0001),
+        LoadSystemConstant(SystemConstants::Index::kPointVertexDiameterMin,
+                           offsetof(SystemConstants, point_vertex_diameter_min),
+                           dxbc::Src::kXXXX),
+        dxbc::Src::R(system_temp_point_size_edge_flag_kill_vertex_,
+                     dxbc::Src::kXXXX));
+    a_.OpIMin(
+        dxbc::Dest::R(system_temp_point_size_edge_flag_kill_vertex_, 0b0001),
+        LoadSystemConstant(SystemConstants::Index::kPointVertexDiameterMax,
+                           offsetof(SystemConstants, point_vertex_diameter_max),
+                           dxbc::Src::kXXXX),
+        dxbc::Src::R(system_temp_point_size_edge_flag_kill_vertex_,
+                     dxbc::Src::kXXXX));
   }
 }
 
@@ -1758,12 +1872,26 @@ void DxbcShaderTranslator::ProcessLoopStartInstruction(
                     2 + (instr.loop_constant_index >> 2))
           .Select(instr.loop_constant_index & 3));
 
-  // Push the count to the loop count stack - move XYZ to YZW and set X to this
-  // loop count.
-  a_.OpMov(dxbc::Dest::R(system_temp_loop_count_, 0b1110),
-           dxbc::Src::R(system_temp_loop_count_, 0b10010000));
-  a_.OpAnd(dxbc::Dest::R(system_temp_loop_count_, 0b0001), loop_constant_src,
-           dxbc::Src::LU(UINT8_MAX));
+  {
+    uint32_t loop_count_temp = PushSystemTemp();
+    a_.OpAnd(dxbc::Dest::R(loop_count_temp, 0b0001), loop_constant_src,
+             dxbc::Src::LU(UINT8_MAX));
+
+    // Skip the loop without pushing if the count is zero from the beginning.
+    a_.OpIf(false, dxbc::Src::R(loop_count_temp, dxbc::Src::kXXXX));
+    JumpToLabel(instr.loop_skip_address);
+    a_.OpEndIf();
+
+    // Push the count to the loop count stack - move XYZ to YZW and set X to the
+    // new loop count.
+    a_.OpMov(dxbc::Dest::R(system_temp_loop_count_, 0b1110),
+             dxbc::Src::R(system_temp_loop_count_, 0b10010000));
+    a_.OpMov(dxbc::Dest::R(system_temp_loop_count_, 0b0001),
+             dxbc::Src::R(loop_count_temp, dxbc::Src::kXXXX));
+
+    // Release loop_count_temp.
+    PopSystemTemp();
+  }
 
   // Push aL - keep the same value as in the previous loop if repeating, or the
   // new one otherwise.
@@ -1773,11 +1901,6 @@ void DxbcShaderTranslator::ProcessLoopStartInstruction(
     a_.OpUBFE(dxbc::Dest::R(system_temp_aL_, 0b0001), dxbc::Src::LU(8),
               dxbc::Src::LU(8), loop_constant_src);
   }
-
-  // Break if the loop counter is 0 (since the condition is checked in the end).
-  a_.OpIf(false, dxbc::Src::R(system_temp_loop_count_, dxbc::Src::kXXXX));
-  JumpToLabel(instr.loop_skip_address);
-  a_.OpEndIf();
 }
 
 void DxbcShaderTranslator::ProcessLoopEndInstruction(
@@ -1891,15 +2014,38 @@ void DxbcShaderTranslator::ProcessJumpInstruction(
 }
 
 void DxbcShaderTranslator::ProcessAllocInstruction(
-    const ParsedAllocInstruction& instr) {
+    const ParsedAllocInstruction& instr, uint8_t export_eM) {
+  bool start_memexport = instr.type == AllocType::kMemory &&
+                         current_shader().memexport_eM_written();
+  if (export_eM || start_memexport) {
+    CloseExecConditionals();
+  }
+
   if (emit_source_map_) {
     instruction_disassembly_buffer_.Reset();
     instr.Disassemble(&instruction_disassembly_buffer_);
     EmitInstructionDisassembly();
   }
 
-  if (instr.type == AllocType::kMemory) {
-    ++memexport_alloc_current_count_;
+  if (export_eM) {
+    ExportToMemory(export_eM);
+    // Reset which eM# elements have been written.
+    a_.OpMov(
+        dxbc::Dest::R(system_temp_memexport_enabled_and_eM_written_, 0b0010),
+        dxbc::Src::LU(0));
+    // Break dependencies from the previous memexport.
+    uint8_t export_eM_remaining = export_eM;
+    uint32_t eM_index;
+    while (xe::bit_scan_forward(export_eM_remaining, &eM_index)) {
+      export_eM_remaining &= ~(uint8_t(1) << eM_index);
+      a_.OpMov(dxbc::Dest::R(system_temps_memexport_data_[eM_index]),
+               dxbc::Src::LF(0.0f));
+    }
+  }
+
+  if (start_memexport) {
+    // Initialize eA to an invalid address.
+    a_.OpMov(dxbc::Dest::R(system_temp_memexport_address_), dxbc::Src::LU(0));
   }
 }
 
@@ -1922,9 +2068,6 @@ const DxbcShaderTranslator::ShaderRdefType
         {"float4", dxbc::RdefVariableClass::kVector,
          dxbc::RdefVariableType::kFloat, 1, 4, 0,
          ShaderRdefTypeIndex::kUnknown},
-        // kInt
-        {"int", dxbc::RdefVariableClass::kScalar, dxbc::RdefVariableType::kInt,
-         1, 1, 0, ShaderRdefTypeIndex::kUnknown},
         // kUint
         {"dword", dxbc::RdefVariableClass::kScalar,
          dxbc::RdefVariableType::kUInt, 1, 1, 0, ShaderRdefTypeIndex::kUnknown},
@@ -1959,8 +2102,9 @@ const DxbcShaderTranslator::ShaderRdefType
          dxbc::RdefVariableType::kUInt, 1, 4, 0, ShaderRdefTypeIndex::kUint4},
 };
 
-const DxbcShaderTranslator::SystemConstantRdef DxbcShaderTranslator::
-    system_constant_rdef_[DxbcShaderTranslator::kSysConst_Count] = {
+const DxbcShaderTranslator::SystemConstantRdef
+    DxbcShaderTranslator::system_constant_rdef_[size_t(
+        DxbcShaderTranslator::SystemConstants::Index::kCount)] = {
         {"xe_flags", ShaderRdefTypeIndex::kUint, sizeof(uint32_t)},
         {"xe_tessellation_factor_range", ShaderRdefTypeIndex::kFloat2,
          sizeof(float) * 2},
@@ -1969,23 +2113,25 @@ const DxbcShaderTranslator::SystemConstantRdef DxbcShaderTranslator::
 
         {"xe_vertex_index_endian", ShaderRdefTypeIndex::kUint,
          sizeof(uint32_t)},
-        {"xe_vertex_base_index", ShaderRdefTypeIndex::kInt, sizeof(int32_t)},
-        {"xe_point_size", ShaderRdefTypeIndex::kFloat2, sizeof(float) * 2},
-
-        {"xe_point_size_min_max", ShaderRdefTypeIndex::kFloat2,
-         sizeof(float) * 2},
-        {"xe_point_screen_to_ndc", ShaderRdefTypeIndex::kFloat2,
-         sizeof(float) * 2},
+        {"xe_vertex_index_offset", ShaderRdefTypeIndex::kUint, sizeof(int32_t)},
+        {"xe_vertex_index_min_max", ShaderRdefTypeIndex::kUint2,
+         sizeof(uint32_t) * 2},
 
         {"xe_user_clip_planes", ShaderRdefTypeIndex::kFloat4Array6,
          sizeof(float) * 4 * 6},
 
         {"xe_ndc_scale", ShaderRdefTypeIndex::kFloat3, sizeof(float) * 3},
-        {"xe_interpolator_sampling_pattern", ShaderRdefTypeIndex::kUint,
-         sizeof(uint32_t)},
+        {"xe_point_vertex_diameter_min", ShaderRdefTypeIndex::kFloat,
+         sizeof(float)},
 
         {"xe_ndc_offset", ShaderRdefTypeIndex::kFloat3, sizeof(float) * 3},
-        {"xe_ps_param_gen", ShaderRdefTypeIndex::kUint, sizeof(uint32_t)},
+        {"xe_point_vertex_diameter_max", ShaderRdefTypeIndex::kFloat,
+         sizeof(float)},
+
+        {"xe_point_constant_diameter", ShaderRdefTypeIndex::kFloat2,
+         sizeof(float) * 2},
+        {"xe_point_screen_diameter_to_ndc_radius", ShaderRdefTypeIndex::kFloat2,
+         sizeof(float) * 2},
 
         {"xe_texture_swizzled_signs", ShaderRdefTypeIndex::kUint4Array2,
          sizeof(uint32_t) * 4 * 2},
@@ -1995,20 +2141,18 @@ const DxbcShaderTranslator::SystemConstantRdef DxbcShaderTranslator::
          sizeof(uint32_t) * 2},
         {"xe_alpha_test_reference", ShaderRdefTypeIndex::kFloat, sizeof(float)},
 
-        {"xe_color_exp_bias", ShaderRdefTypeIndex::kFloat4, sizeof(float) * 4},
-
         {"xe_alpha_to_mask", ShaderRdefTypeIndex::kUint, sizeof(uint32_t)},
-        {"xe_edram_pitch_tiles", ShaderRdefTypeIndex::kUint, sizeof(uint32_t)},
-        {"xe_edram_depth_range", ShaderRdefTypeIndex::kFloat2,
-         sizeof(float) * 2},
+        {"xe_edram_32bpp_tile_pitch_dwords_scaled", ShaderRdefTypeIndex::kUint,
+         sizeof(uint32_t)},
+        {"xe_edram_depth_base_dwords_scaled", ShaderRdefTypeIndex::kUint,
+         sizeof(uint32_t), sizeof(uint32_t)},
+
+        {"xe_color_exp_bias", ShaderRdefTypeIndex::kFloat4, sizeof(float) * 4},
 
         {"xe_edram_poly_offset_front", ShaderRdefTypeIndex::kFloat2,
          sizeof(float) * 2},
         {"xe_edram_poly_offset_back", ShaderRdefTypeIndex::kFloat2,
          sizeof(float) * 2},
-
-        {"xe_edram_depth_base_dwords", ShaderRdefTypeIndex::kUint,
-         sizeof(uint32_t), sizeof(float) * 3},
 
         {"xe_edram_stencil", ShaderRdefTypeIndex::kUint4Array2,
          sizeof(uint32_t) * 4 * 2},
@@ -2110,9 +2254,9 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
   // Names.
   name_ptr = (uint32_t(shader_object_.size()) - blob_position_dwords) *
              sizeof(uint32_t);
-  uint32_t constant_name_ptrs_system[kSysConst_Count];
+  uint32_t constant_name_ptrs_system[size_t(SystemConstants::Index::kCount)];
   if (cbuffer_index_system_constants_ != kBindingIndexUnallocated) {
-    for (uint32_t i = 0; i < kSysConst_Count; ++i) {
+    for (size_t i = 0; i < size_t(SystemConstants::Index::kCount); ++i) {
       constant_name_ptrs_system[i] = name_ptr;
       name_ptr += dxbc::AppendAlignedString(shader_object_,
                                             system_constant_rdef_[i].name);
@@ -2144,11 +2288,11 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
   if (cbuffer_index_system_constants_ != kBindingIndexUnallocated) {
     shader_object_.resize(constant_position_dwords_system +
                           sizeof(dxbc::RdefVariable) / sizeof(uint32_t) *
-                              kSysConst_Count);
+                              size_t(SystemConstants::Index::kCount));
     auto constants_system = reinterpret_cast<dxbc::RdefVariable*>(
         shader_object_.data() + constant_position_dwords_system);
     uint32_t constant_offset_system = 0;
-    for (uint32_t i = 0; i < kSysConst_Count; ++i) {
+    for (size_t i = 0; i < size_t(SystemConstants::Index::kCount); ++i) {
       dxbc::RdefVariable& constant_system = constants_system[i];
       const SystemConstantRdef& translator_constant_system =
           system_constant_rdef_[i];
@@ -2303,7 +2447,7 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
       cbuffer.type = dxbc::RdefCbufferType::kCbuffer;
       if (i == cbuffer_index_system_constants_) {
         cbuffer.name_ptr = cbuffer_name_ptr_system;
-        cbuffer.variable_count = kSysConst_Count;
+        cbuffer.variable_count = uint32_t(SystemConstants::Index::kCount);
         cbuffer.variables_ptr =
             (constant_position_dwords_system - blob_position_dwords) *
             sizeof(uint32_t);
@@ -2362,7 +2506,7 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
     } else {
       for (uint32_t i = 0; i < uint32_t(sampler_bindings_.size()); ++i) {
         name_ptr += dxbc::AppendAlignedString(
-            shader_object_, sampler_bindings_[i].name.c_str());
+            shader_object_, sampler_bindings_[i].bindful_name.c_str());
       }
     }
   }
@@ -2390,8 +2534,8 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
   } else {
     for (TextureBinding& texture_binding : texture_bindings_) {
       texture_binding.bindful_srv_rdef_name_ptr = name_ptr;
-      name_ptr += dxbc::AppendAlignedString(shader_object_,
-                                            texture_binding.name.c_str());
+      name_ptr += dxbc::AppendAlignedString(
+          shader_object_, texture_binding.bindful_name.c_str());
     }
   }
   uint32_t shared_memory_uav_name_ptr = name_ptr;
@@ -2429,8 +2573,8 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
         sampler.bind_point = uint32_t(i);
         sampler.bind_count = 1;
         sampler.id = uint32_t(i);
-        sampler_current_name_ptr +=
-            dxbc::GetAlignedStringLength(sampler_bindings_[i].name.c_str());
+        sampler_current_name_ptr += dxbc::GetAlignedStringLength(
+            sampler_bindings_[i].bindful_name.c_str());
       }
     }
   }
@@ -2634,7 +2778,7 @@ void DxbcShaderTranslator::WriteInputSignature() {
           shader_object_.data() + vertex_id_position);
       vertex_id.system_value = dxbc::Name::kVertexID;
       vertex_id.component_type = dxbc::SignatureRegisterComponentType::kUInt32;
-      vertex_id.register_index = uint32_t(InOutRegister::kVSInVertexIndex);
+      vertex_id.register_index = kInRegisterVSVertexIndex;
       vertex_id.mask = 0b0001;
       vertex_id.always_reads_mask = (register_count() >= 1) ? 0b0001 : 0b0000;
     }
@@ -2651,10 +2795,7 @@ void DxbcShaderTranslator::WriteInputSignature() {
   } else if (IsDxbcDomainShader()) {
     // Control point indices, byte-swapped, biased according to the base index
     // and converted to float by the host vertex and hull shaders
-    // (XEVERTEXID). Needed even for patch-indexed tessellation modes because
-    // hull and domain shaders have strict linkage requirements, all hull shader
-    // outputs must be declared in a domain shader, and the same hull shaders
-    // are used for control-point-indexed and patch-indexed tessellation modes.
+    // (XEVERTEXID).
     size_t control_point_index_position = shader_object_.size();
     shader_object_.resize(shader_object_.size() + kParameterDwords);
     ++parameter_count;
@@ -2663,8 +2804,7 @@ void DxbcShaderTranslator::WriteInputSignature() {
           shader_object_.data() + control_point_index_position);
       control_point_index.component_type =
           dxbc::SignatureRegisterComponentType::kFloat32;
-      control_point_index.register_index =
-          uint32_t(InOutRegister::kDSInControlPointIndex);
+      control_point_index.register_index = kInRegisterDSControlPointIndex;
       control_point_index.mask = 0b0001;
       control_point_index.always_reads_mask =
           in_control_point_index_used_ ? 0b0001 : 0b0000;
@@ -2680,69 +2820,53 @@ void DxbcShaderTranslator::WriteInputSignature() {
     }
     semantic_offset += dxbc::AppendAlignedString(shader_object_, "XEVERTEXID");
   } else if (is_pixel_shader()) {
-    // Written dynamically, so assume it's always used if it can be written to
-    // any interpolator register.
-    bool param_gen_used = !is_depth_only_pixel_shader_ && register_count() != 0;
-
     // Intepolators (TEXCOORD#).
     size_t interpolator_position = shader_object_.size();
+    uint32_t interpolator_mask = GetModificationInterpolatorMask();
+    uint32_t interpolator_count = xe::bit_count(interpolator_mask);
     shader_object_.resize(shader_object_.size() +
-                          xenos::kMaxInterpolators * kParameterDwords);
-    parameter_count += xenos::kMaxInterpolators;
+                          interpolator_count * kParameterDwords);
+    parameter_count += interpolator_count;
     {
       auto interpolators = reinterpret_cast<dxbc::SignatureParameter*>(
           shader_object_.data() + interpolator_position);
-      for (uint32_t i = 0; i < xenos::kMaxInterpolators; ++i) {
-        dxbc::SignatureParameter& interpolator = interpolators[i];
-        interpolator.semantic_index = i;
+      uint32_t used_interpolator_index = 0;
+      uint32_t interpolators_remaining = interpolator_mask;
+      uint32_t interpolator_index;
+      while (
+          xe::bit_scan_forward(interpolators_remaining, &interpolator_index)) {
+        interpolators_remaining &= ~(UINT32_C(1) << interpolator_index);
+        dxbc::SignatureParameter& interpolator =
+            interpolators[used_interpolator_index];
+        interpolator.semantic_index = used_interpolator_index;
         interpolator.component_type =
             dxbc::SignatureRegisterComponentType::kFloat32;
         interpolator.register_index =
-            uint32_t(InOutRegister::kPSInInterpolators) + i;
+            in_reg_ps_interpolators_ + used_interpolator_index;
         interpolator.mask = 0b1111;
-        // Interpolators are copied to GPRs in the beginning of the shader. If
-        // there's a register to copy to, this interpolator is used.
         interpolator.always_reads_mask =
-            (!is_depth_only_pixel_shader_ && i < register_count()) ? 0b1111
-                                                                   : 0b0000;
+            interpolator_index < register_count() ? 0b1111 : 0b0000;
+        ++used_interpolator_index;
       }
     }
 
-    // Point parameters for ps_param_gen - coordinate on the point and point
-    // size as a float3 TEXCOORD (but the size in Z is not needed).
-    size_t point_parameters_position = shader_object_.size();
-    shader_object_.resize(shader_object_.size() + kParameterDwords);
-    ++parameter_count;
-    {
-      auto& point_parameters = *reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + point_parameters_position);
-      point_parameters.semantic_index = kPointParametersTexCoord;
-      point_parameters.component_type =
-          dxbc::SignatureRegisterComponentType::kFloat32;
-      point_parameters.register_index =
-          uint32_t(InOutRegister::kPSInPointParameters);
-      point_parameters.mask = 0b0111;
-      point_parameters.always_reads_mask = param_gen_used ? 0b0011 : 0b0000;
+    // Point coordinates for PsParamGen (XESPRITETEXCOORD).
+    size_t point_coordinates_position = shader_object_.size();
+    if (in_reg_ps_point_coordinates_ != UINT32_MAX) {
+      shader_object_.resize(shader_object_.size() + kParameterDwords);
+      ++parameter_count;
+      {
+        auto& point_coordinates = *reinterpret_cast<dxbc::SignatureParameter*>(
+            shader_object_.data() + point_coordinates_position);
+        point_coordinates.component_type =
+            dxbc::SignatureRegisterComponentType::kFloat32;
+        point_coordinates.register_index = in_reg_ps_point_coordinates_;
+        point_coordinates.mask = 0b0011;
+        point_coordinates.always_reads_mask = 0b0011;
+      }
     }
 
-    // Z and W in clip space, for getting per-sample depth with ROV (TEXCOORD#).
-    size_t clip_space_zw_position = shader_object_.size();
-    shader_object_.resize(shader_object_.size() + kParameterDwords);
-    ++parameter_count;
-    {
-      auto& clip_space_zw = *reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + clip_space_zw_position);
-      clip_space_zw.semantic_index = kClipSpaceZWTexCoord;
-      clip_space_zw.component_type =
-          dxbc::SignatureRegisterComponentType::kFloat32;
-      clip_space_zw.register_index = uint32_t(InOutRegister::kPSInClipSpaceZW);
-      clip_space_zw.mask = 0b0011;
-      clip_space_zw.always_reads_mask = edram_rov_used_ ? 0b0011 : 0b0000;
-    }
-
-    // Pixel position. Z is not needed - ROV depth testing calculates the depth
-    // from the clip space Z/W texcoord, and if oDepth is used, it must be
-    // written to on every execution path anyway (SV_Position).
+    // Pixel position (SV_Position).
     size_t position_position = shader_object_.size();
     shader_object_.resize(shader_object_.size() + kParameterDwords);
     ++parameter_count;
@@ -2751,7 +2875,7 @@ void DxbcShaderTranslator::WriteInputSignature() {
           shader_object_.data() + position_position);
       position.system_value = dxbc::Name::kPosition;
       position.component_type = dxbc::SignatureRegisterComponentType::kFloat32;
-      position.register_index = uint32_t(InOutRegister::kPSInPosition);
+      position.register_index = in_reg_ps_position_;
       position.mask = 0b1111;
       position.always_reads_mask = in_position_used_;
     }
@@ -2766,8 +2890,7 @@ void DxbcShaderTranslator::WriteInputSignature() {
       is_front_face.system_value = dxbc::Name::kIsFrontFace;
       is_front_face.component_type =
           dxbc::SignatureRegisterComponentType::kUInt32;
-      is_front_face.register_index =
-          uint32_t(InOutRegister::kPSInFrontFaceAndSampleIndex);
+      is_front_face.register_index = in_reg_ps_front_face_sample_index_;
       is_front_face.mask = 0b0001;
       is_front_face.always_reads_mask = in_front_face_used_ ? 0b0001 : 0b0000;
     }
@@ -2775,7 +2898,7 @@ void DxbcShaderTranslator::WriteInputSignature() {
     // Sample index (SV_SampleIndex) for safe memexport with sample-rate
     // shading.
     size_t sample_index_position = SIZE_MAX;
-    if (current_shader().is_valid_memexport_used() && IsSampleRate()) {
+    if (current_shader().memexport_eM_written() && IsSampleRate()) {
       size_t sample_index_position = shader_object_.size();
       shader_object_.resize(shader_object_.size() + kParameterDwords);
       ++parameter_count;
@@ -2785,8 +2908,7 @@ void DxbcShaderTranslator::WriteInputSignature() {
         sample_index.system_value = dxbc::Name::kSampleIndex;
         sample_index.component_type =
             dxbc::SignatureRegisterComponentType::kUInt32;
-        sample_index.register_index =
-            uint32_t(InOutRegister::kPSInFrontFaceAndSampleIndex);
+        sample_index.register_index = in_reg_ps_front_face_sample_index_;
         sample_index.mask = 0b0010;
         sample_index.always_reads_mask = 0b0010;
       }
@@ -2795,20 +2917,21 @@ void DxbcShaderTranslator::WriteInputSignature() {
     // Semantic names.
     uint32_t semantic_offset =
         uint32_t((shader_object_.size() - blob_position) * sizeof(uint32_t));
-    {
+    if (interpolator_count) {
       auto interpolators = reinterpret_cast<dxbc::SignatureParameter*>(
           shader_object_.data() + interpolator_position);
-      for (uint32_t i = 0; i < xenos::kMaxInterpolators; ++i) {
+      for (uint32_t i = 0; i < interpolator_count; ++i) {
         interpolators[i].semantic_name_ptr = semantic_offset;
       }
-      auto& point_parameters = *reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + point_parameters_position);
-      point_parameters.semantic_name_ptr = semantic_offset;
-      auto& clip_space_zw = *reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + clip_space_zw_position);
-      clip_space_zw.semantic_name_ptr = semantic_offset;
+      semantic_offset += dxbc::AppendAlignedString(shader_object_, "TEXCOORD");
     }
-    semantic_offset += dxbc::AppendAlignedString(shader_object_, "TEXCOORD");
+    if (in_reg_ps_point_coordinates_ != UINT32_MAX) {
+      auto& point_coordinates = *reinterpret_cast<dxbc::SignatureParameter*>(
+          shader_object_.data() + point_coordinates_position);
+      point_coordinates.semantic_name_ptr = semantic_offset;
+      semantic_offset +=
+          dxbc::AppendAlignedString(shader_object_, "XESPRITETEXCOORD");
+    }
     {
       auto& position = *reinterpret_cast<dxbc::SignatureParameter*>(
           shader_object_.data() + position_position);
@@ -2967,57 +3090,27 @@ void DxbcShaderTranslator::WriteOutputSignature() {
   constexpr size_t kParameterDwords =
       sizeof(dxbc::SignatureParameter) / sizeof(uint32_t);
 
+  Modification shader_modification = GetDxbcShaderModification();
+
   if (is_vertex_shader()) {
     // Intepolators (TEXCOORD#).
     size_t interpolator_position = shader_object_.size();
+    uint32_t interpolator_count =
+        xe::bit_count(GetModificationInterpolatorMask());
     shader_object_.resize(shader_object_.size() +
-                          xenos::kMaxInterpolators * kParameterDwords);
-    parameter_count += xenos::kMaxInterpolators;
+                          interpolator_count * kParameterDwords);
+    parameter_count += interpolator_count;
     {
       auto interpolators = reinterpret_cast<dxbc::SignatureParameter*>(
           shader_object_.data() + interpolator_position);
-      for (uint32_t i = 0; i < xenos::kMaxInterpolators; ++i) {
+      for (uint32_t i = 0; i < interpolator_count; ++i) {
         dxbc::SignatureParameter& interpolator = interpolators[i];
         interpolator.semantic_index = i;
         interpolator.component_type =
             dxbc::SignatureRegisterComponentType::kFloat32;
-        interpolator.register_index =
-            uint32_t(InOutRegister::kVSDSOutInterpolators) + i;
+        interpolator.register_index = out_reg_vs_interpolators_ + i;
         interpolator.mask = 0b1111;
       }
-    }
-
-    // Point parameters - coordinate on the point and point size as a float3
-    // TEXCOORD. Always used because reset to (0, 0, -1).
-    size_t point_parameters_position = shader_object_.size();
-    shader_object_.resize(shader_object_.size() + kParameterDwords);
-    ++parameter_count;
-    {
-      auto& point_parameters = *reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + point_parameters_position);
-      point_parameters.semantic_index = kPointParametersTexCoord;
-      point_parameters.component_type =
-          dxbc::SignatureRegisterComponentType::kFloat32;
-      point_parameters.register_index =
-          uint32_t(InOutRegister::kVSDSOutPointParameters);
-      point_parameters.mask = 0b0111;
-      point_parameters.never_writes_mask = 0b1000;
-    }
-
-    // Z and W in clip space, for getting per-sample depth with ROV (TEXCOORD#).
-    size_t clip_space_zw_position = shader_object_.size();
-    shader_object_.resize(shader_object_.size() + kParameterDwords);
-    ++parameter_count;
-    {
-      auto& clip_space_zw = *reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + clip_space_zw_position);
-      clip_space_zw.semantic_index = kClipSpaceZWTexCoord;
-      clip_space_zw.component_type =
-          dxbc::SignatureRegisterComponentType::kFloat32;
-      clip_space_zw.register_index =
-          uint32_t(InOutRegister::kVSDSOutClipSpaceZW);
-      clip_space_zw.mask = 0b0011;
-      clip_space_zw.never_writes_mask = 0b1100;
     }
 
     // Position (SV_Position).
@@ -3029,94 +3122,136 @@ void DxbcShaderTranslator::WriteOutputSignature() {
           shader_object_.data() + position_position);
       position.system_value = dxbc::Name::kPosition;
       position.component_type = dxbc::SignatureRegisterComponentType::kFloat32;
-      position.register_index = uint32_t(InOutRegister::kVSDSOutPosition);
+      position.register_index = out_reg_vs_position_;
       position.mask = 0b1111;
     }
 
     // Clip (SV_ClipDistance) and cull (SV_CullDistance) distances.
-    size_t clip_distance_0123_position = shader_object_.size();
-    shader_object_.resize(shader_object_.size() + kParameterDwords);
-    ++parameter_count;
-    {
-      auto& clip_distance_0123 = *reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + clip_distance_0123_position);
-      clip_distance_0123.system_value = dxbc::Name::kClipDistance;
-      clip_distance_0123.component_type =
-          dxbc::SignatureRegisterComponentType::kFloat32;
-      clip_distance_0123.register_index =
-          uint32_t(InOutRegister::kVSDSOutClipDistance0123);
-      clip_distance_0123.mask = 0b1111;
+    size_t clip_and_cull_distance_position = shader_object_.size();
+    uint32_t clip_distance_count =
+        shader_modification.GetVertexClipDistanceCount();
+    uint32_t cull_distance_count =
+        shader_modification.GetVertexCullDistanceCount();
+    uint32_t clip_and_cull_distance_count =
+        clip_distance_count + cull_distance_count;
+    uint32_t clip_distance_parameter_count = 0;
+    uint32_t cull_distance_parameter_count = 0;
+    for (uint32_t i = 0; i < clip_and_cull_distance_count; i += 4) {
+      uint32_t clip_cull_distance_register =
+          out_reg_vs_clip_cull_distances_ + (i >> 2);
+      if (i < clip_distance_count) {
+        shader_object_.resize(shader_object_.size() + kParameterDwords);
+        ++parameter_count;
+        {
+          auto& clip_distance = *reinterpret_cast<dxbc::SignatureParameter*>(
+              shader_object_.data() +
+              (shader_object_.size() - kParameterDwords));
+          clip_distance.semantic_index = clip_distance_parameter_count;
+          clip_distance.system_value = dxbc::Name::kClipDistance;
+          clip_distance.component_type =
+              dxbc::SignatureRegisterComponentType::kFloat32;
+          clip_distance.register_index = clip_cull_distance_register;
+          uint8_t clip_distance_mask =
+              (UINT8_C(1) << std::min(clip_distance_count - i, UINT32_C(4))) -
+              1;
+          clip_distance.mask = clip_distance_mask;
+          clip_distance.never_writes_mask = clip_distance_mask ^ 0b1111;
+        }
+        ++clip_distance_parameter_count;
+      }
+      if (cull_distance_count && i + 4 > clip_distance_count) {
+        shader_object_.resize(shader_object_.size() + kParameterDwords);
+        ++parameter_count;
+        {
+          auto& cull_distance = *reinterpret_cast<dxbc::SignatureParameter*>(
+              shader_object_.data() +
+              (shader_object_.size() - kParameterDwords));
+          cull_distance.semantic_index = cull_distance_parameter_count;
+          cull_distance.system_value = dxbc::Name::kCullDistance;
+          cull_distance.component_type =
+              dxbc::SignatureRegisterComponentType::kFloat32;
+          cull_distance.register_index = clip_cull_distance_register;
+          uint8_t cull_distance_mask =
+              (UINT8_C(1) << std::min(cull_distance_count - i, UINT32_C(4))) -
+              1;
+          if (i < clip_distance_count) {
+            cull_distance_mask &=
+                ~((UINT8_C(1) << (clip_distance_count - i)) - 1);
+          }
+          cull_distance.mask = cull_distance_mask;
+          cull_distance.never_writes_mask = cull_distance_mask ^ 0b1111;
+        }
+        ++cull_distance_parameter_count;
+      }
     }
-    size_t clip_distance_45_position = shader_object_.size();
-    shader_object_.resize(shader_object_.size() + kParameterDwords);
-    ++parameter_count;
-    {
-      auto& clip_distance_45 = *reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + clip_distance_45_position);
-      clip_distance_45.semantic_index = 1;
-      clip_distance_45.system_value = dxbc::Name::kClipDistance;
-      clip_distance_45.component_type =
-          dxbc::SignatureRegisterComponentType::kFloat32;
-      clip_distance_45.register_index =
-          uint32_t(InOutRegister::kVSDSOutClipDistance45AndCullDistance);
-      clip_distance_45.mask = 0b0011;
-      clip_distance_45.never_writes_mask = 0b1100;
-    }
-    size_t cull_distance_position = shader_object_.size();
-    shader_object_.resize(shader_object_.size() + kParameterDwords);
-    ++parameter_count;
-    {
-      auto& cull_distance = *reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + cull_distance_position);
-      cull_distance.system_value = dxbc::Name::kCullDistance;
-      cull_distance.component_type =
-          dxbc::SignatureRegisterComponentType::kFloat32;
-      cull_distance.register_index =
-          uint32_t(InOutRegister::kVSDSOutClipDistance45AndCullDistance);
-      cull_distance.mask = 0b0100;
-      cull_distance.never_writes_mask = 0b1011;
+
+    // Point size (XEPSIZE). Always used because reset to -1.
+    size_t point_size_position = shader_object_.size();
+    if (out_reg_vs_point_size_ != UINT32_MAX) {
+      shader_object_.resize(shader_object_.size() + kParameterDwords);
+      ++parameter_count;
+      {
+        auto& point_size = *reinterpret_cast<dxbc::SignatureParameter*>(
+            shader_object_.data() + point_size_position);
+        point_size.component_type =
+            dxbc::SignatureRegisterComponentType::kFloat32;
+        point_size.register_index = out_reg_vs_point_size_;
+        point_size.mask = 0b0001;
+        point_size.never_writes_mask = 0b1110;
+      }
     }
 
     // Semantic names.
     uint32_t semantic_offset =
         uint32_t((shader_object_.size() - blob_position) * sizeof(uint32_t));
-    {
-      auto interpolators = reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + interpolator_position);
-      for (uint32_t i = 0; i < xenos::kMaxInterpolators; ++i) {
-        interpolators[i].semantic_name_ptr = semantic_offset;
+    if (interpolator_count) {
+      {
+        auto interpolators = reinterpret_cast<dxbc::SignatureParameter*>(
+            shader_object_.data() + interpolator_position);
+        for (uint32_t i = 0; i < interpolator_count; ++i) {
+          interpolators[i].semantic_name_ptr = semantic_offset;
+        }
       }
-      auto& point_parameters = *reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + point_parameters_position);
-      point_parameters.semantic_name_ptr = semantic_offset;
-      auto& clip_space_zw = *reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + clip_space_zw_position);
-      clip_space_zw.semantic_name_ptr = semantic_offset;
+      semantic_offset += dxbc::AppendAlignedString(shader_object_, "TEXCOORD");
     }
-    semantic_offset += dxbc::AppendAlignedString(shader_object_, "TEXCOORD");
     {
       auto& position = *reinterpret_cast<dxbc::SignatureParameter*>(
           shader_object_.data() + position_position);
       position.semantic_name_ptr = semantic_offset;
     }
     semantic_offset += dxbc::AppendAlignedString(shader_object_, "SV_Position");
-    {
-      auto& clip_distance_0123 = *reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + clip_distance_0123_position);
-      clip_distance_0123.semantic_name_ptr = semantic_offset;
-      auto& clip_distance_45 = *reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + clip_distance_45_position);
-      clip_distance_45.semantic_name_ptr = semantic_offset;
+    if (clip_distance_parameter_count) {
+      {
+        auto clip_distances = reinterpret_cast<dxbc::SignatureParameter*>(
+            shader_object_.data() + clip_and_cull_distance_position);
+        for (uint32_t i = 0; i < clip_distance_parameter_count; ++i) {
+          clip_distances[i].semantic_name_ptr = semantic_offset;
+        }
+      }
+      semantic_offset +=
+          dxbc::AppendAlignedString(shader_object_, "SV_ClipDistance");
     }
-    semantic_offset +=
-        dxbc::AppendAlignedString(shader_object_, "SV_ClipDistance");
-    {
-      auto& cull_distance = *reinterpret_cast<dxbc::SignatureParameter*>(
-          shader_object_.data() + cull_distance_position);
-      cull_distance.semantic_name_ptr = semantic_offset;
+    if (cull_distance_parameter_count) {
+      {
+        auto cull_distances =
+            reinterpret_cast<dxbc::SignatureParameter*>(
+                shader_object_.data() + clip_and_cull_distance_position) +
+            clip_distance_parameter_count;
+        for (uint32_t i = 0; i < cull_distance_parameter_count; ++i) {
+          cull_distances[i].semantic_name_ptr = semantic_offset;
+        }
+      }
+      semantic_offset +=
+          dxbc::AppendAlignedString(shader_object_, "SV_CullDistance");
     }
-    semantic_offset +=
-        dxbc::AppendAlignedString(shader_object_, "SV_CullDistance");
+    if (out_reg_vs_point_size_ != UINT32_MAX) {
+      {
+        auto& point_size = *reinterpret_cast<dxbc::SignatureParameter*>(
+            shader_object_.data() + point_size_position);
+        point_size.semantic_name_ptr = semantic_offset;
+      }
+      semantic_offset += dxbc::AppendAlignedString(shader_object_, "XEPSIZE");
+    }
   } else if (is_pixel_shader()) {
     if (!edram_rov_used_) {
       uint32_t color_targets_written = current_shader().writes_color_targets();
@@ -3148,7 +3283,8 @@ void DxbcShaderTranslator::WriteOutputSignature() {
 
       // Coverage output for alpha to mask (SV_Coverage).
       size_t coverage_position = SIZE_MAX;
-      if (color_targets_written & 0b1) {
+      if ((color_targets_written & 0b1) &&
+          !IsForceEarlyDepthStencilGlobalFlagEnabled()) {
         coverage_position = shader_object_.size();
         shader_object_.resize(shader_object_.size() + kParameterDwords);
         ++parameter_count;
@@ -3161,8 +3297,6 @@ void DxbcShaderTranslator::WriteOutputSignature() {
       }
 
       // Depth (SV_Depth or SV_DepthLessEqual).
-      Modification::DepthStencilMode depth_stencil_mode =
-          GetDxbcShaderModification().pixel.depth_stencil_mode;
       size_t depth_position = SIZE_MAX;
       if (current_shader().writes_depth() || DSV_IsWritingFloat24Depth()) {
         depth_position = shader_object_.size();
@@ -3207,7 +3341,7 @@ void DxbcShaderTranslator::WriteOutputSignature() {
         }
         const char* depth_semantic_name;
         if (!current_shader().writes_depth() &&
-            GetDxbcShaderModification().pixel.depth_stencil_mode ==
+            shader_modification.pixel.depth_stencil_mode ==
                 Modification::DepthStencilMode::kFloat24Truncating) {
           depth_semantic_name = "SV_DepthLessEqual";
         } else {
@@ -3246,21 +3380,25 @@ void DxbcShaderTranslator::WriteShaderCode() {
 
   Modification shader_modification = GetDxbcShaderModification();
 
+  uint32_t control_point_count = 1;
   if (IsDxbcDomainShader()) {
-    // Not using control point data since Xenos only has a vertex shader acting
-    // as both vertex shader and domain shader.
-    uint32_t control_point_count = 3;
     dxbc::TessellatorDomain tessellator_domain =
         dxbc::TessellatorDomain::kTriangle;
     switch (shader_modification.vertex.host_vertex_shader_type) {
       case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
-      case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
         control_point_count = 3;
         tessellator_domain = dxbc::TessellatorDomain::kTriangle;
         break;
+      case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
+        control_point_count = 1;
+        tessellator_domain = dxbc::TessellatorDomain::kTriangle;
+        break;
       case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
-      case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
         control_point_count = 4;
+        tessellator_domain = dxbc::TessellatorDomain::kQuad;
+        break;
+      case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
+        control_point_count = 1;
         tessellator_domain = dxbc::TessellatorDomain::kQuad;
         break;
       default:
@@ -3276,14 +3414,11 @@ void DxbcShaderTranslator::WriteShaderCode() {
 
   // Don't allow refactoring when converting to native code to maintain position
   // invariance (needed even in pixel shaders for oDepth invariance).
-  uint32_t global_flags = 0;
-  if (is_pixel_shader() &&
-      GetDxbcShaderModification().pixel.depth_stencil_mode ==
-          Modification::DepthStencilMode::kEarlyHint &&
-      !edram_rov_used_ && current_shader().implicit_early_z_write_allowed()) {
-    global_flags |= dxbc::kGlobalFlagForceEarlyDepthStencil;
-  }
-  ao_.OpDclGlobalFlags(global_flags);
+  bool global_flag_force_early_depth_stencil =
+      IsForceEarlyDepthStencilGlobalFlagEnabled();
+  ao_.OpDclGlobalFlags(global_flag_force_early_depth_stencil
+                           ? dxbc::kGlobalFlagForceEarlyDepthStencil
+                           : 0);
 
   // Constant buffers, from most frequenly accessed to least frequently accessed
   // (the order is a hint to the driver according to the DXBC header).
@@ -3441,92 +3576,84 @@ void DxbcShaderTranslator::WriteShaderCode() {
         // Domain location input.
         ao_.OpDclInput(dxbc::Dest::VDomain(in_domain_location_used_));
       }
-      if (in_primitive_id_used_) {
-        // Primitive (patch) index input.
-        ao_.OpDclInput(dxbc::Dest::VPrim());
-      }
       if (in_control_point_index_used_) {
-        // Control point indices as float input.
-        uint32_t control_point_array_size = 3;
-        switch (shader_modification.vertex.host_vertex_shader_type) {
-          case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
-            control_point_array_size = 3;
-            break;
-          case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
-            control_point_array_size = 4;
-            break;
-          default:
-            // TODO(Triang3l): Support line patches.
-            assert_unhandled_case(
-                shader_modification.vertex.host_vertex_shader_type);
-            EmitTranslationError(
-                "Unsupported host vertex shader type in "
-                "StartVertexOrDomainShader");
-        }
         ao_.OpDclInput(dxbc::Dest::VICP(
-            control_point_array_size,
-            uint32_t(InOutRegister::kDSInControlPointIndex), 0b0001));
+            control_point_count, kInRegisterDSControlPointIndex, 0b0001));
       }
     } else {
       if (register_count()) {
         // Unswapped vertex index input (only X component).
-        ao_.OpDclInputSGV(
-            dxbc::Dest::V(uint32_t(InOutRegister::kVSInVertexIndex), 0b0001),
-            dxbc::Name::kVertexID);
+        ao_.OpDclInputSGV(dxbc::Dest::V1D(kInRegisterVSVertexIndex, 0b0001),
+                          dxbc::Name::kVertexID);
       }
     }
     // Interpolator output.
-    for (uint32_t i = 0; i < xenos::kMaxInterpolators; ++i) {
-      ao_.OpDclOutput(
-          dxbc::Dest::O(uint32_t(InOutRegister::kVSDSOutInterpolators) + i));
+    uint32_t interpolator_count =
+        xe::bit_count(GetModificationInterpolatorMask());
+    for (uint32_t i = 0; i < interpolator_count; ++i) {
+      ao_.OpDclOutput(dxbc::Dest::O(out_reg_vs_interpolators_ + i));
     }
-    // Point parameters output.
-    ao_.OpDclOutput(dxbc::Dest::O(
-        uint32_t(InOutRegister::kVSDSOutPointParameters), 0b0111));
-    // Clip space Z and W output.
-    ao_.OpDclOutput(
-        dxbc::Dest::O(uint32_t(InOutRegister::kVSDSOutClipSpaceZW), 0b0011));
     // Position output.
-    ao_.OpDclOutputSIV(dxbc::Dest::O(uint32_t(InOutRegister::kVSDSOutPosition)),
+    ao_.OpDclOutputSIV(dxbc::Dest::O(out_reg_vs_position_),
                        dxbc::Name::kPosition);
-    // Clip distance outputs.
-    for (uint32_t i = 0; i < 2; ++i) {
-      ao_.OpDclOutputSIV(
-          dxbc::Dest::O(uint32_t(InOutRegister::kVSDSOutClipDistance0123) + i,
-                        i ? 0b0011 : 0b1111),
-          dxbc::Name::kClipDistance);
+    // Clip and cull distance outputs.
+    uint32_t clip_distance_count =
+        shader_modification.GetVertexClipDistanceCount();
+    uint32_t cull_distance_count =
+        shader_modification.GetVertexCullDistanceCount();
+    uint32_t clip_and_cull_distance_count =
+        clip_distance_count + cull_distance_count;
+    for (uint32_t i = 0; i < clip_and_cull_distance_count; i += 4) {
+      if (i < clip_distance_count) {
+        ao_.OpDclOutputSIV(
+            dxbc::Dest::O(out_reg_vs_clip_cull_distances_ + (i >> 2),
+                          (UINT32_C(1)
+                           << std::min(clip_distance_count - i, UINT32_C(4))) -
+                              1),
+            dxbc::Name::kClipDistance);
+      }
+      if (cull_distance_count && i + 4 > clip_distance_count) {
+        uint32_t cull_distance_mask =
+            (UINT32_C(1) << std::min(clip_and_cull_distance_count - i,
+                                     UINT32_C(4))) -
+            1;
+        if (i < clip_distance_count) {
+          cull_distance_mask &=
+              ~((UINT32_C(1) << (clip_distance_count - i)) - 1);
+        }
+        ao_.OpDclOutputSIV(
+            dxbc::Dest::O(out_reg_vs_clip_cull_distances_ + (i >> 2),
+                          cull_distance_mask),
+            dxbc::Name::kCullDistance);
+      }
     }
-    // Cull distance output.
-    ao_.OpDclOutputSIV(
-        dxbc::Dest::O(
-            uint32_t(InOutRegister::kVSDSOutClipDistance45AndCullDistance),
-            0b0100),
-        dxbc::Name::kCullDistance);
+    // Point size output.
+    if (out_reg_vs_point_size_ != UINT32_MAX) {
+      ao_.OpDclOutput(dxbc::Dest::O(out_reg_vs_point_size_, 0b0001));
+    }
   } else if (is_pixel_shader()) {
     bool is_writing_float24_depth = DSV_IsWritingFloat24Depth();
     bool shader_writes_depth = current_shader().writes_depth();
     // Interpolator input.
-    if (!is_depth_only_pixel_shader_) {
-      uint32_t interpolator_count =
-          std::min(xenos::kMaxInterpolators, register_count());
-      for (uint32_t i = 0; i < interpolator_count; ++i) {
-        ao_.OpDclInputPS(
-            dxbc::InterpolationMode::kLinear,
-            dxbc::Dest::V(uint32_t(InOutRegister::kPSInInterpolators) + i));
+    uint32_t interpolator_register_index = in_reg_ps_interpolators_;
+    uint32_t interpolators_remaining = GetModificationInterpolatorMask();
+    uint32_t interpolator_index;
+    while (xe::bit_scan_forward(interpolators_remaining, &interpolator_index)) {
+      interpolators_remaining &= ~(UINT32_C(1) << interpolator_index);
+      if (interpolator_index >= register_count()) {
+        break;
       }
-      if (register_count()) {
-        // Point parameters input (only coordinates, not size, needed).
-        ao_.OpDclInputPS(
-            dxbc::InterpolationMode::kLinear,
-            dxbc::Dest::V(uint32_t(InOutRegister::kPSInPointParameters),
-                          0b0011));
-      }
+      ao_.OpDclInputPS((shader_modification.pixel.interpolators_centroid &
+                        (UINT32_C(1) << interpolator_index))
+                           ? dxbc::InterpolationMode::kLinearCentroid
+                           : dxbc::InterpolationMode::kLinear,
+                       dxbc::Dest::V1D(interpolator_register_index));
+      ++interpolator_register_index;
     }
-    if (edram_rov_used_) {
-      // Z and W in clip space, for per-sample depth.
-      ao_.OpDclInputPS(
-          dxbc::InterpolationMode::kLinear,
-          dxbc::Dest::V(uint32_t(InOutRegister::kPSInClipSpaceZW), 0b0011));
+    if (in_reg_ps_point_coordinates_ != UINT32_MAX) {
+      // Point coordinates input.
+      ao_.OpDclInputPS(dxbc::InterpolationMode::kLinear,
+                       dxbc::Dest::V1D(in_reg_ps_point_coordinates_, 0b0011));
     }
     if (in_position_used_) {
       // Position input (XY needed for ps_param_gen, Z needed for non-ROV
@@ -3541,12 +3668,11 @@ void DxbcShaderTranslator::WriteShaderCode() {
           (is_writing_float24_depth && !shader_writes_depth)
               ? dxbc::InterpolationMode::kLinearNoPerspectiveSample
               : dxbc::InterpolationMode::kLinearNoPerspective,
-          dxbc::Dest::V(uint32_t(InOutRegister::kPSInPosition),
-                        in_position_used_),
+          dxbc::Dest::V1D(in_reg_ps_position_, in_position_used_),
           dxbc::Name::kPosition);
     }
     bool sample_rate_memexport =
-        current_shader().is_valid_memexport_used() && IsSampleRate();
+        current_shader().memexport_eM_written() && IsSampleRate();
     // Sample-rate shading can't be done with UAV-only rendering (sample-rate
     // shading is only needed for float24 depth conversion when using a float32
     // host depth buffer).
@@ -3555,10 +3681,9 @@ void DxbcShaderTranslator::WriteShaderCode() {
         uint32_t(in_front_face_used_) | (uint32_t(sample_rate_memexport) << 1);
     if (front_face_and_sample_index_mask) {
       // Is front face, sample index.
-      ao_.OpDclInputPSSGV(
-          dxbc::Dest::V(uint32_t(InOutRegister::kPSInFrontFaceAndSampleIndex),
-                        front_face_and_sample_index_mask),
-          dxbc::Name::kIsFrontFace);
+      ao_.OpDclInputPSSGV(dxbc::Dest::V1D(in_reg_ps_front_face_sample_index_,
+                                          front_face_and_sample_index_mask),
+                          dxbc::Name::kIsFrontFace);
     }
     if (edram_rov_used_) {
       // Sample coverage input.
@@ -3576,7 +3701,8 @@ void DxbcShaderTranslator::WriteShaderCode() {
         }
       }
       // Coverage output for alpha to mask.
-      if (color_targets_written & 0b1) {
+      if ((color_targets_written & 0b1) &&
+          !global_flag_force_early_depth_stencil) {
         ao_.OpDclOutput(dxbc::Dest::OMask());
       }
       // Depth output.

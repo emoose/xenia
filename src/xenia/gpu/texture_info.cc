@@ -73,18 +73,11 @@ bool TextureInfo::Prepare(const xe_gpu_texture_fetch_t& fetch,
   info.pitch = fetch.pitch << 5;
 
   info.mip_min_level = fetch.mip_min_level;
-  info.mip_max_level = std::max(fetch.mip_min_level, fetch.mip_max_level);
+  info.mip_max_level =
+      std::max(uint32_t(fetch.mip_min_level), uint32_t(fetch.mip_max_level));
 
   info.is_tiled = fetch.tiled;
   info.has_packed_mips = fetch.packed_mips;
-
-  if (info.format_info()->format == xenos::TextureFormat::kUnknown) {
-    XELOGE("Attempting to fetch from unsupported texture format {}",
-           info.format);
-    info.memory.base_address = fetch.base_address << 12;
-    info.memory.mip_address = fetch.mip_address << 12;
-    return false;
-  }
 
   info.extent = TextureExtent::Calculate(out_info, true);
   info.SetupMemoryInfo(fetch.base_address << 12, fetch.mip_address << 12);
@@ -124,12 +117,6 @@ bool TextureInfo::PrepareResolve(uint32_t physical_address,
 
   info.is_tiled = true;
   info.has_packed_mips = false;
-
-  if (info.format_info()->format == xenos::TextureFormat::kUnknown) {
-    assert_true("Unsupported texture format");
-    info.memory.base_address = physical_address;
-    return false;
-  }
 
   info.extent = TextureExtent::Calculate(out_info, true);
   info.SetupMemoryInfo(physical_address, 0);

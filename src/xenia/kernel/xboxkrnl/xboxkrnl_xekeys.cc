@@ -21,34 +21,34 @@ namespace xboxkrnl {
 
 // xboxkrnl_crypt.cc
 
-void XeCryptBnQw_SwapDwQwLeBe(pointer_t<uint64_t> qw_inp,
+void XeCryptBnQw_SwapDwQwLeBe_entry(pointer_t<uint64_t> qw_inp,
                               pointer_t<uint64_t> qw_out, dword_t size);
-dword_result_t XeCryptBnQwNeRsaPrvCrypt(pointer_t<uint64_t> qw_a,
+dword_result_t XeCryptBnQwNeRsaPrvCrypt_entry(pointer_t<uint64_t> qw_a,
                                         pointer_t<uint64_t> qw_b,
                                         pointer_t<XECRYPT_RSA> rsa);
-dword_result_t XeCryptBnQwNeRsaPubCrypt(pointer_t<uint64_t> qw_a,
+dword_result_t XeCryptBnQwNeRsaPubCrypt_entry(pointer_t<uint64_t> qw_a,
                                         pointer_t<uint64_t> qw_b,
                                         pointer_t<XECRYPT_RSA> rsa);
 
-void XeCryptBnDwLePkcs1Format(lpvoid_t hash, dword_t format,
+void XeCryptBnDwLePkcs1Format_entry(lpvoid_t hash, dword_t format,
                               lpvoid_t output_sig, dword_t output_sig_size);
-dword_result_t XeCryptBnDwLePkcs1Verify(lpvoid_t hash, lpvoid_t input_sig,
+dword_result_t XeCryptBnDwLePkcs1Verify_entry(lpvoid_t hash, lpvoid_t input_sig,
                                         dword_t input_sig_size);
 
-void XeCryptHmacSha(lpvoid_t key, dword_t key_size_in, lpvoid_t inp_1,
+void XeCryptHmacSha_entry(lpvoid_t key, dword_t key_size_in, lpvoid_t inp_1,
                     dword_t inp_1_size, lpvoid_t inp_2, dword_t inp_2_size,
                     lpvoid_t inp_3, dword_t inp_3_size, lpvoid_t out,
                     dword_t out_size);
-void XeCryptAesKey(pointer_t<XECRYPT_AES_STATE> state_ptr, lpvoid_t key);
-void XeCryptAesEcb(pointer_t<XECRYPT_AES_STATE> state_ptr, lpvoid_t inp_ptr,
+void XeCryptAesKey_entry(pointer_t<XECRYPT_AES_STATE> state_ptr, lpvoid_t key);
+void XeCryptAesEcb_entry(pointer_t<XECRYPT_AES_STATE> state_ptr, lpvoid_t inp_ptr,
                    lpvoid_t out_ptr, dword_t encrypt);
-void XeCryptAesCbc(pointer_t<XECRYPT_AES_STATE> state_ptr, lpvoid_t inp_ptr,
+void XeCryptAesCbc_entry(pointer_t<XECRYPT_AES_STATE> state_ptr, lpvoid_t inp_ptr,
                    dword_t inp_size, lpvoid_t out_ptr, lpvoid_t feed_ptr,
                    dword_t encrypt);
-void XeCryptRc4(lpvoid_t key, dword_t key_size, lpvoid_t data, dword_t size);
-void XeCryptRc4Key(pointer_t<XECRYPT_RC4_STATE> rc4_ctx, lpvoid_t key,
+void XeCryptRc4_entry(lpvoid_t key, dword_t key_size, lpvoid_t data, dword_t size);
+void XeCryptRc4Key_entry(pointer_t<XECRYPT_RC4_STATE> rc4_ctx, lpvoid_t key,
                    dword_t key_size);
-void XeCryptRc4Ecb(pointer_t<XECRYPT_RC4_STATE> rc4_ctx, lpvoid_t data,
+void XeCryptRc4Ecb_entry(pointer_t<XECRYPT_RC4_STATE> rc4_ctx, lpvoid_t data,
                    dword_t size);
 
 // Offsets/sizes of each xekey
@@ -133,7 +133,7 @@ bool xeKeysIsKeySupported(XeKey key_idx) {
   return kXeKeyProperties.count(key_idx) > 0;
 }
 
-dword_result_t XeKeysGetConsoleType();
+dword_result_t XeKeysGetConsoleType_entry();
 
 uint8_t* xeKeysGetKeyPtrRaw(XeKey key_idx) {
   auto& key_info = kXeKeyProperties.at(key_idx);
@@ -146,7 +146,7 @@ void xeKeysFixupKeyVault() {
   // Perform any setup on loaded KV
 
   auto* roamable_key = xeKeysGetKeyPtrRaw(XeKey::ROAMABLE_OBFUSCATION_KEY);
-  if (XeKeysGetConsoleType() == (uint32_t)XConsoleType::Retail)
+  if (XeKeysGetConsoleType_entry() == (uint32_t)XConsoleType::Retail)
     std::copy_n(kRoamableObfuscationKey_Retail, 0x10, roamable_key);
   else
     std::copy_n(kRoamableObfuscationKey_Devkit, 0x10, roamable_key);
@@ -208,7 +208,7 @@ bool xeKeysLoadKeyVault() {
   return true;
 }
 
-dword_result_t XeKeysLoadKeyVault(lpvoid_t r3) { return xeKeysLoadKeyVault(); }
+dword_result_t XeKeysLoadKeyVault_entry(lpvoid_t r3) { return xeKeysLoadKeyVault(); }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysLoadKeyVault, kNone, kImplemented);
 
 bool xeKeysGetKey(XeKey key_idx, uint8_t* output, uint32_t* output_size) {
@@ -241,13 +241,13 @@ bool xeKeysGetKey(XeKey key_idx, uint8_t* output, uint32_t* output_size) {
   return true;
 }
 
-dword_result_t XeKeysGetKey(dword_t key_idx, lpvoid_t output,
+dword_result_t XeKeysGetKey_entry(dword_t key_idx, lpvoid_t output,
                             pointer_t<uint32_t> output_size) {
   return xeKeysGetKey((XeKey)(uint32_t)key_idx, output, output_size);
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysGetKey, kNone, kImplemented);
 
-dword_result_t XeKeysGetConsoleCertificate(
+dword_result_t XeKeysGetConsoleCertificate_entry(
     pointer_t<X_XE_CONSOLE_CERTIFICATE> output) {
   if (!kXeKeyVaultLoaded) {
     XELOGE(
@@ -260,7 +260,7 @@ dword_result_t XeKeysGetConsoleCertificate(
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysGetConsoleCertificate, kNone, kImplemented);
 
-dword_result_t XeKeysGetConsoleType() {
+dword_result_t XeKeysGetConsoleType_entry() {
   if (!kXeKeyVaultLoaded) {
     XELOGE(
         "XeKeysGetConsoleType called without keyvault loaded - returning 2 "
@@ -278,7 +278,7 @@ dword_result_t XeKeysGetConsoleType() {
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysGetConsoleType, kNone, kImplemented);
 
-dword_result_t XeKeysGetConsoleID(lpvoid_t raw_bytes, lpvoid_t hex_string) {
+dword_result_t XeKeysGetConsoleID_entry(lpvoid_t raw_bytes, lpvoid_t hex_string) {
   if (!kXeKeyVaultLoaded) {
     XELOGE(
         "XeKeysGetConsoleID called without keyvault loaded - returning empty "
@@ -309,7 +309,7 @@ dword_result_t XeKeysGetConsoleID(lpvoid_t raw_bytes, lpvoid_t hex_string) {
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysGetConsoleID, kNone, kImplemented);
 
-dword_result_t XeKeysQwNeRsaPrvCrypt(dword_t key_idx, pointer_t<uint64_t> input,
+dword_result_t XeKeysQwNeRsaPrvCrypt_entry(dword_t key_idx, pointer_t<uint64_t> input,
                                      pointer_t<uint64_t> output) {
   // returns BOOL
   if (!kXeKeyVaultLoaded) {
@@ -331,12 +331,12 @@ dword_result_t XeKeysQwNeRsaPrvCrypt(dword_t key_idx, pointer_t<uint64_t> input,
   }
 
   auto* key_ptr = xeKeysGetKeyPtr<XECRYPT_RSA>(key);
-  return XeCryptBnQwNeRsaPrvCrypt(input, output, key_ptr);
+  return XeCryptBnQwNeRsaPrvCrypt_entry(input, output, key_ptr);
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysQwNeRsaPrvCrypt, kNone, kImplemented);
 
 // Signs the given hash with the loaded keyvaults private-key + console cert
-dword_result_t XeKeysConsolePrivateKeySign(
+dword_result_t XeKeysConsolePrivateKeySign_entry(
     lpvoid_t hash, pointer_t<X_XE_CONSOLE_SIGNATURE> output_cert_sig) {
   // returns BOOL
   if (!kXeKeyVaultLoaded) {
@@ -348,20 +348,20 @@ dword_result_t XeKeysConsolePrivateKeySign(
 
   uint64_t sig_buf[0x10];
 
-  XeCryptBnDwLePkcs1Format((uint8_t*)hash, 0,
+  XeCryptBnDwLePkcs1Format_entry((uint8_t*)hash, 0,
                            reinterpret_cast<uint8_t*>(sig_buf), 0x10 * 8);
-  XeCryptBnQw_SwapDwQwLeBe(sig_buf, sig_buf, 0x10);
+  XeCryptBnQw_SwapDwQwLeBe_entry(sig_buf, sig_buf, 0x10);
 
-  if (!XeKeysQwNeRsaPrvCrypt((uint32_t)XeKey::CONSOLE_PRIVATE_KEY, sig_buf,
+  if (!XeKeysQwNeRsaPrvCrypt_entry((uint32_t)XeKey::CONSOLE_PRIVATE_KEY, sig_buf,
                              sig_buf)) {
     return false;
   }
 
-  XeCryptBnQw_SwapDwQwLeBe(
+  XeCryptBnQw_SwapDwQwLeBe_entry(
       sig_buf, reinterpret_cast<uint64_t*>(output_cert_sig->signature), 0x10);
 
   // Copy in console cert
-  XeKeysGetConsoleCertificate(&output_cert_sig->console_certificate);
+  XeKeysGetConsoleCertificate_entry(&output_cert_sig->console_certificate);
   return true;
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysConsolePrivateKeySign, kNone, kImplemented);
@@ -377,16 +377,16 @@ bool xeKeysPkcs1Verify(const uint8_t* hash, const uint64_t* input_sig,
   }
 
   xe::copy_and_swap<uint64_t>(temp_sig, input_sig, 0x10);
-  if (!XeCryptBnQwNeRsaPubCrypt(temp_sig, temp_sig, (XECRYPT_RSA*)key)) {
+  if (!XeCryptBnQwNeRsaPubCrypt_entry(temp_sig, temp_sig, (XECRYPT_RSA*)key)) {
     return false;
   }
 
   xe::copy_and_swap<uint64_t>(temp_sig, temp_sig, 0x10);
-  return XeCryptBnDwLePkcs1Verify(
+  return XeCryptBnDwLePkcs1Verify_entry(
       (void*)hash, reinterpret_cast<uint8_t*>(temp_sig), 0x10 * 8);
 }
 
-dword_result_t XeKeysVerifyRSASignature(dword_t use_live_key, lpvoid_t hash,
+dword_result_t XeKeysVerifyRSASignature_entry(dword_t use_live_key, lpvoid_t hash,
                                         pointer_t<uint64_t> signature) {
   // returns BOOL
   if (!kXeKeyVaultLoaded) {
@@ -420,7 +420,7 @@ dword_result_t XeKeysVerifyRSASignature(dword_t use_live_key, lpvoid_t hash,
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysVerifyRSASignature, kNone, kImplemented);
 
-dword_result_t XeKeysHmacSha(dword_t key_num, lpvoid_t inp_1,
+dword_result_t XeKeysHmacSha_entry(dword_t key_num, lpvoid_t inp_1,
                              dword_t inp_1_size, lpvoid_t inp_2,
                              dword_t inp_2_size, lpvoid_t inp_3,
                              dword_t inp_3_size, lpvoid_t out,
@@ -428,7 +428,7 @@ dword_result_t XeKeysHmacSha(dword_t key_num, lpvoid_t inp_1,
   const uint8_t* key = xeKeysGetKeyPtr<uint8_t>((XeKey)(uint32_t)key_num);
 
   if (key) {
-    XeCryptHmacSha((void*)key, 0x10, inp_1, inp_1_size, inp_2, inp_2_size,
+    XeCryptHmacSha_entry((void*)key, 0x10, inp_1, inp_1_size, inp_2, inp_2_size,
                    inp_3, inp_3_size, out, out_size);
 
     return X_STATUS_SUCCESS;
@@ -438,34 +438,34 @@ dword_result_t XeKeysHmacSha(dword_t key_num, lpvoid_t inp_1,
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysHmacSha, kNone, kImplemented);
 
-dword_result_t XeKeysAesCbcUsingKey(lpvoid_t obscured_key, lpvoid_t inp_ptr,
+dword_result_t XeKeysAesCbcUsingKey_entry(lpvoid_t obscured_key, lpvoid_t inp_ptr,
                                     dword_t inp_size, lpvoid_t out_ptr,
                                     lpvoid_t feed_ptr, dword_t encrypt) {
   uint8_t key[16];
 
   // Deobscure key
   XECRYPT_AES_STATE aes;
-  XeCryptAesKey(&aes, xeKeysGetKeyPtr<uint8_t>(XeKey::KEY_OBFUSCATION_KEY));
-  XeCryptAesEcb(&aes, obscured_key, key, 0);
+  XeCryptAesKey_entry(&aes, xeKeysGetKeyPtr<uint8_t>(XeKey::KEY_OBFUSCATION_KEY));
+  XeCryptAesEcb_entry(&aes, obscured_key, key, 0);
 
   // Run CBC using deobscured key
-  XeCryptAesKey(&aes, key);
-  XeCryptAesCbc(&aes, inp_ptr, inp_size, out_ptr, feed_ptr, encrypt);
+  XeCryptAesKey_entry(&aes, key);
+  XeCryptAesCbc_entry(&aes, inp_ptr, inp_size, out_ptr, feed_ptr, encrypt);
 
   return X_STATUS_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysAesCbcUsingKey, kNone, kImplemented);
 
-dword_result_t XeKeysObscureKey(lpvoid_t input, lpvoid_t output) {
+dword_result_t XeKeysObscureKey_entry(lpvoid_t input, lpvoid_t output) {
   XECRYPT_AES_STATE aes;
-  XeCryptAesKey(&aes, xeKeysGetKeyPtr<uint8_t>(XeKey::KEY_OBFUSCATION_KEY));
-  XeCryptAesEcb(&aes, input, output, 1);
+  XeCryptAesKey_entry(&aes, xeKeysGetKeyPtr<uint8_t>(XeKey::KEY_OBFUSCATION_KEY));
+  XeCryptAesEcb_entry(&aes, input, output, 1);
 
   return X_STATUS_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysObscureKey, kNone, kImplemented);
 
-dword_result_t XeKeysHmacShaUsingKey(lpvoid_t obscured_key, lpvoid_t inp_1,
+dword_result_t XeKeysHmacShaUsingKey_entry(lpvoid_t obscured_key, lpvoid_t inp_1,
                                      dword_t inp_1_size, lpvoid_t inp_2,
                                      dword_t inp_2_size, lpvoid_t inp_3,
                                      dword_t inp_3_size, lpvoid_t out,
@@ -478,16 +478,16 @@ dword_result_t XeKeysHmacShaUsingKey(lpvoid_t obscured_key, lpvoid_t inp_1,
 
   // Deobscure key
   XECRYPT_AES_STATE aes;
-  XeCryptAesKey(&aes, xeKeysGetKeyPtr<uint8_t>(XeKey::KEY_OBFUSCATION_KEY));
-  XeCryptAesEcb(&aes, obscured_key, key, 0);
+  XeCryptAesKey_entry(&aes, xeKeysGetKeyPtr<uint8_t>(XeKey::KEY_OBFUSCATION_KEY));
+  XeCryptAesEcb_entry(&aes, obscured_key, key, 0);
 
-  XeCryptHmacSha(key, 0x10, inp_1, inp_1_size, inp_2, inp_2_size, inp_3,
+  XeCryptHmacSha_entry(key, 0x10, inp_1, inp_1_size, inp_2, inp_2_size, inp_3,
                  inp_3_size, out, out_size);
   return X_STATUS_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysHmacShaUsingKey, kNone, kImplemented);
 
-dword_result_t XeKeysObfuscate(dword_t roaming, lpvoid_t input,
+dword_result_t XeKeysObfuscate_entry(dword_t roaming, lpvoid_t input,
                                dword_t input_size, lpvoid_t output,
                                pointer_t<uint32_t> output_size) {
   // Don't need to worry about keyvault being loaded as ROAMABLE key is setup by
@@ -507,7 +507,7 @@ dword_result_t XeKeysObfuscate(dword_t roaming, lpvoid_t input,
                                     : XeKey::CONSOLE_OBFUSCATION_KEY);
 
   auto result =
-      XeKeysHmacSha((uint32_t)key_idx, output_ptr + 0x10, *output_size - 0x10,
+      XeKeysHmacSha_entry((uint32_t)key_idx, output_ptr + 0x10, *output_size - 0x10,
                     nullptr, 0, nullptr, 0, output_ptr, 0x10);
   if (XFAILED(result)) {
     return result;
@@ -515,19 +515,19 @@ dword_result_t XeKeysObfuscate(dword_t roaming, lpvoid_t input,
 
   uint8_t key[0x10];
   auto result2 =
-      XeKeysHmacSha((uint32_t)key_idx, output_ptr, 0x10, 0, 0, 0, 0, key, 0x10);
+      XeKeysHmacSha_entry((uint32_t)key_idx, output_ptr, 0x10, 0, 0, 0, 0, key, 0x10);
 
   if (XFAILED(result2)) {
     return result2;
   }
 
-  XeCryptRc4(key, 0x10, output_ptr + 0x10, *output_size - 0x10);
+  XeCryptRc4_entry(key, 0x10, output_ptr + 0x10, *output_size - 0x10);
 
   return result2;
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysObfuscate, kNone, kImplemented);
 
-dword_result_t XeKeysUnObfuscate(dword_t roaming, lpvoid_t input,
+dword_result_t XeKeysUnObfuscate_entry(dword_t roaming, lpvoid_t input,
                                  dword_t input_size, lpvoid_t output,
                                  pointer_t<uint32_t> output_size) {
   // returns BOOL
@@ -552,19 +552,19 @@ dword_result_t XeKeysUnObfuscate(dword_t roaming, lpvoid_t input,
                                     : XeKey::CONSOLE_OBFUSCATION_KEY);
 
   uint8_t key[0x10];
-  auto result = XeKeysHmacSha(key_idx, hmac_header, 0x10, nullptr, 0, nullptr,
+  auto result = XeKeysHmacSha_entry(key_idx, hmac_header, 0x10, nullptr, 0, nullptr,
                               0, key, 0x10);
   if (XFAILED(result)) {
     return false;
   }
 
   XECRYPT_RC4_STATE rc4;
-  XeCryptRc4Key(&rc4, key, 0x10);
-  XeCryptRc4Ecb(&rc4, hmac_header + 0x10, 8);
-  XeCryptRc4Ecb(&rc4, output_ptr, *output_size);
+  XeCryptRc4Key_entry(&rc4, key, 0x10);
+  XeCryptRc4Ecb_entry(&rc4, hmac_header + 0x10, 8);
+  XeCryptRc4Ecb_entry(&rc4, output_ptr, *output_size);
 
   uint8_t hash[0x10];
-  XeKeysHmacSha(key_idx, hmac_header + 0x10, 8, output_ptr, *output_size,
+  XeKeysHmacSha_entry(key_idx, hmac_header + 0x10, 8, output_ptr, *output_size,
                 nullptr, 0, hash, 0x10);
 
   return std::memcmp(hash, hmac_header, 0x10) == 0;

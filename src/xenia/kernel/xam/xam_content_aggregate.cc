@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -23,7 +23,7 @@ namespace xe {
 namespace kernel {
 namespace xam {
 
-void AddODDContentTest(object_ref<XStaticEnumerator> e,
+void AddODDContentTest(object_ref<XStaticUntypedEnumerator> e,
                        XContentType content_type) {
   auto root_entry = kernel_state()->file_system()->ResolvePath(
       "game:\\Content\\0000000000000000");
@@ -75,11 +75,11 @@ void AddODDContentTest(object_ref<XStaticEnumerator> e,
   }
 }
 
-dword_result_t XamContentAggregateCreateEnumerator(qword_t xuid,
-                                                   dword_t device_id,
-                                                   dword_t content_type,
-                                                   unknown_t unk3,
-                                                   lpdword_t handle_out) {
+dword_result_t XamContentAggregateCreateEnumerator_entry(qword_t xuid,
+                                                         dword_t device_id,
+                                                         dword_t content_type,
+                                                         unknown_t unk3,
+                                                         lpdword_t handle_out) {
   assert_not_null(handle_out);
 
   auto device_info = device_id == 0 ? nullptr : GetDummyDeviceInfo(device_id);
@@ -87,16 +87,18 @@ dword_result_t XamContentAggregateCreateEnumerator(qword_t xuid,
     return X_E_INVALIDARG;
   }
 
-  auto e = object_ref<XStaticEnumerator>(new XStaticEnumerator(
-      kernel_state(), 1, sizeof(XCONTENT_AGGREGATE_DATA)));
+  auto e = make_object<XStaticEnumerator<XCONTENT_AGGREGATE_DATA>>(
+      kernel_state(), 1);
   X_KENUMERATOR_CONTENT_AGGREGATE* extra;
   auto result = e->Initialize(0xFF, 0xFE, 0x2000E, 0x20010, 0, &extra);
   if (XFAILED(result)) {
     return result;
   }
 
-  extra->magic = 'XEN\0';
+  extra->magic = kXObjSignature;
   extra->handle = e->handle();
+
+  auto content_type_enum = XContentType(uint32_t(content_type));
 
   if (!device_info || device_info->device_type == DeviceType::HDD) {
     // Fetch any alternate title IDs defined in the XEX header
@@ -134,9 +136,8 @@ dword_result_t XamContentAggregateCreateEnumerator(qword_t xuid,
 }
 DECLARE_XAM_EXPORT1(XamContentAggregateCreateEnumerator, kContent, kStub);
 
-void RegisterContentAggregateExports(xe::cpu::ExportResolver* export_resolver,
-                                     KernelState* kernel_state) {}
-
 }  // namespace xam
 }  // namespace kernel
 }  // namespace xe
+
+DECLARE_XAM_EMPTY_REGISTER_EXPORTS(ContentAggregate);

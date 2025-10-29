@@ -1,0 +1,55 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#include "texture_load.xesli"
+
+array_buffer_wo_declare_xe(uint4_xe, xe_texture_load_dest, set=0, binding=0, u0,
+                           space0)
+array_buffer_declare_xe(uint4_xe, xe_texture_load_source, set=1, binding=0, t0,
+                        space0)
+entry_bindings_begin_compute_xe
+  XE_TEXTURE_LOAD_PUSH_CONST_BINDING
+  entry_binding_next_xe
+  array_buffer_wo_binding_xe(uint4_xe, xe_texture_load_dest, buffer(1))
+  entry_binding_next_xe
+  array_buffer_binding_xe(uint4_xe, xe_texture_load_source, buffer(2))
+entry_bindings_end_inputs_begin_compute_xe
+  entry_in_global_thread_id_xe
+entry_inputs_end_code_begin_compute_xe
+{
+  // 1 thread = 4 blocks passed through an externally provided
+  // uint4 transformation function (XE_TEXTURE_LOAD_64BPB_TRANSFORM).
+  XeTextureLoadInfo load_info = XeTextureLoadGetInfo(pass_push_consts_xe);
+  uint3_xe block_index = in_global_thread_id_xe << uint3_xe(2u, 0u, 0u);
+  dont_flatten_xe
+  if (any(greater_than_equal_xe(block_index.xy, load_info.size_blocks.xy))) {
+    return;
+  }
+  uint block_offset_host = uint(
+      (XeTextureHostLinearOffset(int3_xe(block_index), load_info.host_pitch,
+                                 load_info.size_blocks.y, 8u) +
+       load_info.host_offset) >> 4u);
+  uint block_offset_guest =
+      XeTextureLoadGuestBlockOffset(load_info, block_index, 8u, 3u) >> 4u;
+  uint4_xe guest_blocks = XeEndianSwap32(
+      array_buffer_load_xe(xe_texture_load_source, block_offset_guest),
+      load_info.endian_32);
+  array_buffer_store_xe(xe_texture_load_dest, block_offset_host,
+                        XE_TEXTURE_LOAD_64BPB_TRANSFORM(guest_blocks));
+  ++block_offset_host;
+  block_offset_guest +=
+      XeTextureLoadRightConsecutiveBlocksOffset(load_info, block_index.x, 3u) >>
+      4u;
+  guest_blocks = XeEndianSwap32(
+      array_buffer_load_xe(xe_texture_load_source, block_offset_guest),
+      load_info.endian_32);
+  array_buffer_store_xe(xe_texture_load_dest, block_offset_host,
+                        XE_TEXTURE_LOAD_64BPB_TRANSFORM(guest_blocks));
+}
+entry_code_end_compute_xe

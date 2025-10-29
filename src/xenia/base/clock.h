@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2019 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -10,24 +10,36 @@
 #ifndef XENIA_BASE_CLOCK_H_
 #define XENIA_BASE_CLOCK_H_
 
+#include <chrono>
 #include <cstdint>
 
 #include "xenia/base/cvar.h"
+#include "xenia/base/platform.h"
+
+#if XE_ARCH_AMD64
+#define XE_CLOCK_RAW_AVAILABLE 1
+#endif
 
 DECLARE_bool(clock_no_scaling);
 DECLARE_bool(clock_source_raw);
 
 namespace xe {
 
+// chrono APIs in xenia/base/chrono.h are preferred
+
 class Clock {
  public:
   // Host ticks-per-second. Generally QueryHostTickFrequency should be used.
   // Either from platform suplied time source or from hardware directly.
   static uint64_t host_tick_frequency_platform();
+#if XE_CLOCK_RAW_AVAILABLE
   static uint64_t host_tick_frequency_raw();
+#endif
   // Host tick count. Generally QueryHostTickCount() should be used.
   static uint64_t host_tick_count_platform();
+#if XE_CLOCK_RAW_AVAILABLE
   static uint64_t host_tick_count_raw();
+#endif
 
   // Queries the host tick frequency.
   static uint64_t QueryHostTickFrequency();

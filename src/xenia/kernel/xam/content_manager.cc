@@ -17,6 +17,7 @@
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
+#include "xenia/kernel/xfile.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/vfs/devices/stfs_container_device.h"
 
@@ -71,7 +72,7 @@ ContentManager::~ContentManager() = default;
 
 std::filesystem::path ContentManager::ResolvePackageRoot(
     XContentType content_type, uint32_t title_id) {
-  if (title_id == -1) {
+  if (title_id == kCurrentlyRunningTitleId) {
     title_id = kernel_state_->title_id();
   }
   auto title_id_str = fmt::format("{:08X}", title_id);
@@ -85,21 +86,21 @@ std::filesystem::path ContentManager::ResolvePackageRoot(
 std::filesystem::path ContentManager::ResolvePackagePath(
     const XCONTENT_AGGREGATE_DATA& data) {
   // Content path:
-  // content_root/title_id/content_type/data_file_name
+  // content_root/title_id/content_type/data_file_name/
   auto package_root = ResolvePackageRoot(data.content_type, data.title_id);
   return package_root / xe::to_path(data.file_name());
 }
 
 std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(
     uint32_t device_id, XContentType content_type, uint32_t title_id) {
-  if (title_id == -1) {
+  std::vector<XCONTENT_AGGREGATE_DATA> result;
+
+  if (title_id == kCurrentlyRunningTitleId) {
     title_id = kernel_state_->title_id();
   }
 
-  std::vector<XCONTENT_AGGREGATE_DATA> result;
-
   // Search path:
-  // content_root/title_id/content_type/*
+  // content_root/title_id/type_name/*
   auto package_root = ResolvePackageRoot(content_type, title_id);
   auto file_infos = xe::filesystem::ListFiles(package_root);
   for (const auto& file_info : file_infos) {
@@ -272,6 +273,7 @@ X_RESULT ContentManager::CloseContent(const std::string_view root_name) {
   if (it == open_packages_.end()) {
     return X_ERROR_FILE_NOT_FOUND;
   }
+  CloseOpenedFilesFromContent(root_name);
 
   auto package = it->second;
   open_packages_.erase(it);
@@ -403,6 +405,28 @@ bool ContentManager::IsContentOpen(const XCONTENT_AGGREGATE_DATA& data) const {
                      [data](std::pair<string_key, ContentPackage*> content) {
                        return data == content.second->GetPackageContentData();
                      });
+}
+
+void ContentManager::CloseOpenedFilesFromContent(
+    const std::string_view root_name) {
+  // TODO(Gliniak): Cleanup this code to care only about handles
+  // related to provided content
+  const std::vector<object_ref<XFile>> all_files_handles =
+      kernel_state_->object_table()->GetObjectsByType<XFile>(
+          XObject::Type::File);
+
+  std::string resolved_path = "";
+  kernel_state_->file_system()->FindSymbolicLink(std::string(root_name) + ':',
+                                                 resolved_path);
+
+  for (const object_ref<XFile>& file : all_files_handles) {
+    std::string file_path = file->entry()->absolute_path();
+    bool is_file_inside_content = utf8::starts_with(file_path, resolved_path);
+
+    if (is_file_inside_content) {
+      file->ReleaseHandle();
+    }
+  }
 }
 
 }  // namespace xam

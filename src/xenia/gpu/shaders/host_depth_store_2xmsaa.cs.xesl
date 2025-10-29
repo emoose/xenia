@@ -1,0 +1,86 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#include "edram.xesli"
+#include "host_depth_store.xesli"
+
+array_buffer_wo_declare_xe(uint4_xe, xe_host_depth_store_dest, set=0, binding=0,
+                           u0, space0)
+#define LOCAL_SIZE_X_XE 8
+#define LOCAL_SIZE_Y_XE 8
+#define LOCAL_SIZE_Z_XE 1
+entry_bindings_begin_compute_xe
+  XE_HOST_DEPTH_STORE_PUSH_CONSTANTS_BINDING
+  entry_binding_next_xe
+  array_buffer_wo_binding_xe(uint4_xe, xe_host_depth_store_dest, buffer(1))
+  entry_binding_next_xe
+  texture_xe(texture_2d_ms_xe, xe_host_depth_store_source, set=1, binding=0,
+             t0, space0, texture(0))
+entry_bindings_end_inputs_begin_compute_xe
+  entry_in_global_thread_id_xe
+entry_inputs_end_code_begin_compute_xe
+{
+  // 1 thread = 8 samples (8x0.5 pixels, resolve granularity is 8 pixels).
+  uint rect_constant = push_const_xe(xe_host_depth_store_rectangle);
+  uint rt_constant = push_const_xe(xe_host_depth_store_render_target);
+  uint2_xe resolution_scale = XeHostDepthStoreRTResolutionScale(rt_constant);
+  // Group height can't cross resolve granularity, Y overflow check not needed.
+  dont_flatten_xe
+  if (in_global_thread_id_xe.x >=
+      (XeHostDepthStoreRectUnscaledWidthDiv8(rect_constant) *
+       resolution_scale.x)) {
+    return;
+  }
+  int2_xe pixel_index = int2_xe(
+      XeHostDepthStoreRectUnscaledOrigin(rect_constant) * resolution_scale +
+      uint2_xe(in_global_thread_id_xe.x << 3u, in_global_thread_id_xe.y >> 1u));
+  uint dest_sample_index = in_global_thread_id_xe.y & 1u;
+  uint edram_address_int4s =
+      XeEdramOffsetInts(uint2_xe(pixel_index), 0u, false,
+                        XeHostDepthStoreRTPitchTiles(rt_constant),
+                        kXenosMsaaSamples_2X, false, 0u, dest_sample_index,
+                        resolution_scale)
+      >> 2u;
+  // Top and bottom to Direct3D 10.1+ and Vulkan top 1 and bottom 0 (for 2x) or
+  // top-left 0 and bottom-right 3 (for 4x).
+  int source_sample_index =
+      XeHostDepthStoreRTMsaa2xSupported(rt_constant)
+          ? (bool(dest_sample_index) ? 0 : 1)
+          : (bool(dest_sample_index) ? 3 : 0);
+  array_buffer_store_xe(
+      xe_host_depth_store_dest, edram_address_int4s,
+      float_bits_to_uint_xe(float4_xe(
+          texel_fetch_2d_ms_xe(xe_host_depth_store_source, pixel_index,
+                               source_sample_index).r,
+          texel_fetch_2d_ms_xe(xe_host_depth_store_source,
+                               pixel_index + int2_xe(1, 0),
+                               source_sample_index).r,
+          texel_fetch_2d_ms_xe(xe_host_depth_store_source,
+                               pixel_index + int2_xe(2, 0),
+                               source_sample_index).r,
+          texel_fetch_2d_ms_xe(xe_host_depth_store_source,
+                               pixel_index + int2_xe(3, 0),
+                               source_sample_index).r)));
+  array_buffer_store_xe(
+      xe_host_depth_store_dest, edram_address_int4s + 1u,
+      float_bits_to_uint_xe(float4_xe(
+          texel_fetch_2d_ms_xe(xe_host_depth_store_source,
+                               pixel_index + int2_xe(4, 0),
+                               source_sample_index).r,
+          texel_fetch_2d_ms_xe(xe_host_depth_store_source,
+                               pixel_index + int2_xe(5, 0),
+                               source_sample_index).r,
+          texel_fetch_2d_ms_xe(xe_host_depth_store_source,
+                               pixel_index + int2_xe(6, 0),
+                               source_sample_index).r,
+          texel_fetch_2d_ms_xe(xe_host_depth_store_source,
+                               pixel_index + int2_xe(7, 0),
+                               source_sample_index).r)));
+}
+entry_code_end_compute_xe

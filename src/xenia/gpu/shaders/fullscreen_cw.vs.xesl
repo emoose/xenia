@@ -1,0 +1,28 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#include "../../ui/shaders/xesl.xesli"
+
+// A clockwise triangle covering the whole viewport.
+
+entry_outputs_begin_xe
+  entry_out_position_xe
+entry_outputs_end_stage_inputs_begin_xe
+entry_stage_inputs_end_bindings_begin_vertex_xe
+entry_bindings_empty_end_inputs_begin_xe
+  entry_in_vertex_id_xe
+entry_inputs_end_code_begin_xe
+{
+  out_position_xe = float4_xe(
+      float2_xe((uint_x2_xe(in_vertex_id_xe) >> uint2_xe(0u, 1u)) & 1u) *
+          float2_xe(4.0f, 4.0f * NDC_DIRECTION_Y_XE) +
+          float2_xe(-1.0f, -NDC_DIRECTION_Y_XE),
+      0.0f, 1.0f);
+}
+entry_code_end_xe

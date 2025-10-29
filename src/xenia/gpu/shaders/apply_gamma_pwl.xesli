@@ -1,0 +1,107 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#include "../../ui/shaders/xesl.xesli"
+
+float XeApplyPWLGamma(uint input_value, uint2_xe ramp_value) {
+  // output = base + (multiplier * delta) / increment
+  // https://developer.amd.com/wordpress/media/2012/10/RRG-216M56-03oOEM.pdf
+  // The lower 6 bits of the base and the delta are 0 (though enforcing that in
+  // the shader is not necessary).
+  // The `(multiplier * delta) / increment` part may result in a nonzero value
+  // in the lower 6 bits of the result, however, so doing `* (1.0f / 64.0f)`
+  // instead of `>> 6` to preserve them (if the render target is 16bpc rather
+  // than 10bpc, for instance).
+  return saturate_xe(
+      (float(ramp_value.x) +
+       float((input_value & 7u) * ramp_value.y) * (1.0f / 8.0f)) *
+      (1.0f / (64.0f * 1023.0f)));
+}
+
+#ifdef XE_APPLY_GAMMA_COMPUTE
+#ifdef XE_APPLY_GAMMA_FXAA_LUMA
+  #define XE_APPLY_GAMMA_DEST_FORMAT image_format_rgba16f_xe
+#else
+  #define XE_APPLY_GAMMA_DEST_FORMAT image_format_rgb10_a2_xe
+#endif
+push_const_begin_xe(b0, space0)
+  uint2_xe xe_apply_gamma_size;
+push_const_end_xe
+#define LOCAL_SIZE_X_XE 16
+#define LOCAL_SIZE_Y_XE 8
+#define LOCAL_SIZE_Z_XE 1
+entry_bindings_begin_compute_xe
+  push_const_binding_xe(buffer(0))
+  entry_binding_next_xe
+  texture_xe(texture_buffer_uint_xe, xe_apply_gamma_ramp, set=0, binding=0, t0,
+             space0, texture(0))
+  entry_binding_next_xe
+  texture_xe(texture_2d_xe, xe_apply_gamma_source, set=1, binding=0, t1, space0,
+             texture(1))
+  entry_binding_next_xe
+  image_wo_xe(image_2d_xe, XE_APPLY_GAMMA_DEST_FORMAT, xe_apply_gamma_dest,
+              set=2, binding=0, u0, space0, texture(2))
+entry_bindings_end_inputs_begin_compute_xe
+  entry_in_global_thread_id_xe
+entry_inputs_end_code_begin_compute_xe
+  uint2_xe pixel_index = in_global_thread_id_xe.xy;
+  dont_flatten_xe
+  if (any(greater_than_equal_xe(pixel_index,
+                                push_const_xe(xe_apply_gamma_size)))) {
+    return;
+  }
+#else
+entry_outputs_begin_xe
+  entry_out_target_xe(float4_xe, xe_apply_gamma_dest, 0)
+entry_outputs_end_stage_inputs_begin_xe
+entry_stage_inputs_end_bindings_begin_pixel_xe
+  texture_xe(texture_buffer_uint_xe, xe_apply_gamma_ramp, set=0, binding=0, t0,
+             space0, texture(0))
+  entry_binding_next_xe
+  texture_xe(texture_2d_xe, xe_apply_gamma_source, set=1, binding=0, t1, space0,
+             texture(1))
+entry_bindings_end_inputs_begin_xe
+  entry_in_pixel_coord_xe
+entry_inputs_end_code_begin_xe
+  uint2_xe pixel_index = uint2_xe(in_pixel_coord_xe.xy);
+#endif  // XE_APPLY_GAMMA_COMPUTE
+  // UNORM conversion according to the Direct3D 10+ rules.
+  uint3_xe apply_gamma_input = uint3_xe(
+      texel_fetch_2d_xe(xe_apply_gamma_source, pixel_index, 0).rgb * 1023.0f +
+      0.5f);
+  // TODO(Triang3l): If this is ever used for gamma other than 128 entries for a
+  // 10bpc front buffer, handle the increment from DC_LUTA/B_CONTROL. Currently
+  // assuming it's 2^3 = 8, or 1024 / 128.
+  float4_xe apply_gamma_output;
+  apply_gamma_output.r = XeApplyPWLGamma(
+      apply_gamma_input.r,
+      texel_fetch_buffer_xe(xe_apply_gamma_ramp,
+                            (apply_gamma_input.r >> 3u) * 3u).rg);
+  apply_gamma_output.g = XeApplyPWLGamma(
+      apply_gamma_input.g,
+      texel_fetch_buffer_xe(xe_apply_gamma_ramp,
+                            (apply_gamma_input.g >> 3u) * 3u + 1u).rg);
+  apply_gamma_output.b = XeApplyPWLGamma(
+      apply_gamma_input.b,
+      texel_fetch_buffer_xe(xe_apply_gamma_ramp,
+                            (apply_gamma_input.b >> 3u) * 3u + 2u).rg);
+  #ifdef XE_APPLY_GAMMA_FXAA_LUMA
+    // Perceptual luma.
+    apply_gamma_output.a =
+        dot(apply_gamma_output.rgb, float3_xe(0.299f, 0.587f, 0.114f));
+  #else
+    apply_gamma_output.a = 1.0f;
+  #endif
+#ifdef XE_APPLY_GAMMA_COMPUTE
+  image_store_2d_rgba_xe(xe_apply_gamma_dest, pixel_index, apply_gamma_output);
+entry_code_end_compute_xe
+#else
+  out_xe(xe_apply_gamma_dest) = apply_gamma_output;
+entry_code_end_xe
+#endif
