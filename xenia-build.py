@@ -100,6 +100,10 @@ def import_vs_environment():
         vswhere = jsonloads(vswhere)
     if vswhere and len(vswhere) > 0:
         version = int(vswhere[0].get("catalog", {}).get("productLineVersion", VSVERSION_MINIMUM))
+        # VS 2026+ returns an internal version number (e.g. "18") instead of
+        # a product year (e.g. "2022"). Clamp to the latest known premake target.
+        if version < 2000:
+            version = VSVERSION_MINIMUM
         install_path = vswhere[0].get("installationPath", None)
 
     vsdevcmd_path = os.path.join(install_path, "Common7", "Tools", "VsDevCmd.bat")
