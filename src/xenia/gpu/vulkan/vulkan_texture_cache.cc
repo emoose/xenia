@@ -259,17 +259,23 @@ constexpr VulkanTextureCache::HostFormatPair
          xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA,
          true},
         // k_32
-        {{kLoadShaderIndexUnknown},
-         {kLoadShaderIndexUnknown},
-         xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR},
+        // There is no Vulkan 32-bit UNORM / SNORM sampled format. Some games
+        // still use these texture formats for data that is already float-like,
+        // so accept them through float views rather than dropping the binding.
+        {{kLoadShaderIndex32bpb, VK_FORMAT_R32_SFLOAT},
+         {kLoadShaderIndex32bpb, VK_FORMAT_R32_SFLOAT},
+         xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR,
+         true},
         // k_32_32
-        {{kLoadShaderIndexUnknown},
-         {kLoadShaderIndexUnknown},
-         xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG},
+        {{kLoadShaderIndex64bpb, VK_FORMAT_R32G32_SFLOAT},
+         {kLoadShaderIndex64bpb, VK_FORMAT_R32G32_SFLOAT},
+         xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG,
+         true},
         // k_32_32_32_32
-        {{kLoadShaderIndexUnknown},
-         {kLoadShaderIndexUnknown},
-         xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA},
+        {{kLoadShaderIndex128bpb, VK_FORMAT_R32G32B32A32_SFLOAT},
+         {kLoadShaderIndex128bpb, VK_FORMAT_R32G32B32A32_SFLOAT},
+         xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA,
+         true},
         // k_32_FLOAT
         {{kLoadShaderIndex32bpb, VK_FORMAT_R32_SFLOAT},
          {kLoadShaderIndex32bpb, VK_FORMAT_R32_SFLOAT},
